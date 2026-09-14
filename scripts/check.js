@@ -38,6 +38,7 @@ import {
   addTopics, nextPending, cancelPendingJobs, listJobs, clearJobs,
 } from '../src/lib/store.js';
 import { normalizeBlogId, normalizeTag, parseTopics } from '../src/lib/util.js';
+import { pasteThreshold } from '../src/naver/editor.js';
 
 const settings = structuredClone(DEFAULT_SETTINGS);
 
@@ -502,7 +503,25 @@ test('개수를 안 쓴 순위 주제는 목표 개수만큼 크게 뽑는다', 
   assert.equal(detectShape('전세 계약 전 확인할 서류', 100).shape, 'general');
 });
 
-console.log('\n[6] 썸네일 배경 그림');
+console.log('\n[6] 네이버 붙여넣기 성공 판정');
+
+test('큰 문단일수록 문턱이 낮아지지 않는다', () => {
+  // 예전 버그: Math.min(20, text.length / 2) 는 40자가 넘는 글이면
+  // 항상 20자로 고정된다. 3,000자짜리 문단이 20자만 들어가도 "성공" 판정을
+  // 받아 나머지가 통째로 사라지는데도 다음 조각으로 넘어갔다.
+  // 그 결과 제목 + 썸네일만 있고 본문은 텅 빈 글이 그대로 저장됐다.
+  const short = pasteThreshold('가'.repeat(10));
+  const long = pasteThreshold('가'.repeat(3000));
+  assert.ok(long > short * 100, `짧은 글 문턱 ${short}, 긴 글 문턱 ${long} — 긴 글이 더 엄격해야 합니다`);
+  assert.ok(long >= 1500, `3,000자 글의 문턱이 ${long}자뿐입니다. 절반도 안 됩니다.`);
+});
+
+test('아주 짧은 조각도 최소 바닥값은 요구한다', () => {
+  assert.ok(pasteThreshold('') >= 1, '빈 문자열도 0보다 큰 문턱이 있어야 합니다');
+  assert.ok(pasteThreshold('짧다') >= 5, '짧은 글의 문턱이 너무 낮습니다');
+});
+
+console.log('\n[7] 썸네일 배경 그림');
 
 test('썸네일 비율에 가장 가까운 허용 비율을 고른다', () => {
   assert.equal(pickAspectRatio(1200, 630), '16:9');

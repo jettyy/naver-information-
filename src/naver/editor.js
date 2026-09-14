@@ -135,12 +135,31 @@ async function bodyTextLength(scope) {
 }
 
 /**
+ * 붙여넣기가 실제로 얼마나 들어갔는지 셀 때 쓰는 최소 증가량.
+ *
+ * 예전에는 `Math.min(20, text.length / 2)` 를 썼다. 40자가 넘는 글이면
+ * 이 값이 **항상 20자로 고정**된다. 그러면 3,000자짜리 문단을 붙여넣다가
+ * 20자만 들어가고 나머지 2,980자가 통째로 사라져도 "성공" 판정을 받는다.
+ * 표를 못 세면 통째로 잘려도 성공으로 치는 것과 똑같은 함정이라, 실제로
+ * 본문이 거의 안 들어간 채(제목 + 이미지 + 링크 카드 하나만 남는 식으로)
+ * 저장까지 되는 사고가 났다.
+ *
+ * 그래서 글자 수에 비례해서 요구한다. 최소한 넣으려던 분량의 60% 는
+ * 실제로 들어가야 성공으로 본다. 아주 짧은 조각(빈 줄 등)을 위해
+ * 바닥값은 남겨 둔다.
+ */
+export function pasteThreshold(text) {
+  return Math.max(8, Math.floor(text.length * 0.6));
+}
+
+/**
  * 서식을 살려 넣는 유일하게 안정적인 방법이 HTML 붙여넣기다.
  * 1) 합성 paste 이벤트 -> 2) 실제 클립보드 + Ctrl+V -> 3) 평문 타이핑 순으로 시도한다.
  */
 async function pasteHtml(page, scope, html) {
   const text = htmlToPlainText(html);
   const before = await bodyTextLength(scope);
+  const threshold = pasteThreshold(text);
 
   const trySynthetic = async () => {
     await scope.evaluate(({ html: source, text: plain }) => {
@@ -157,7 +176,7 @@ async function pasteHtml(page, scope, html) {
       }));
     }, { html, text });
     await page.waitForTimeout(700);
-    return (await bodyTextLength(scope)) > before + Math.min(20, text.length / 2);
+    return (await bodyTextLength(scope)) > before + threshold;
   };
 
   const tryClipboard = async () => {
@@ -170,7 +189,7 @@ async function pasteHtml(page, scope, html) {
     }, { html, text });
     await page.keyboard.press(`${MODIFIER}+V`);
     await page.waitForTimeout(900);
-    return (await bodyTextLength(scope)) > before + Math.min(20, text.length / 2);
+    return (await bodyTextLength(scope)) > before + threshold;
   };
 
   try {
@@ -390,7 +409,14 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
     await bodyField.click({ timeout: 10000 });
     await page.waitForTimeout(200);
 
-    const introMode = await pasteHtml(page, scope, buildIntroHtml(post));
+    // 본문을 다 붙인 뒤, 실제로 얼마나 들어갔는지 통째로 다시 잰다 (아래 참고).
+    // 조각 하나하나는 성공으로 판정됐어도 누적되면 텅 빈 글이 나올 수 있다.
+    const bodyStartLen = await bodyTextLength(scope);
+    let expectedChars = 0;
+
+    const introHtml = buildIntroHtml(post);
+    expectedChars += htmlToPlainText(introHtml).length;
+    const introMode = await pasteHtml(page, scope, introHtml);
     logger.info(`도입부 입력 완료 (${introMode})`, { jobId });
 
     let thumbnailInserted = false;
@@ -412,6 +438,8 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
         await page.waitForTimeout(250);
         continue;
       }
+      // 표는 insertTable 이 table 개수로 따로 확인하니 여기서는 텍스트 조각만 더한다.
+      expectedChars += htmlToPlainText(step.html).length;
       const mode = await pasteHtml(page, scope, BLOCK_GAP + step.html);
       if (plan.length > 3) logger.info(`본문 조각 입력 (${mode})`, { jobId });
       await page.waitForTimeout(250);
@@ -420,6 +448,24 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
       `본문 입력 완료 (텍스트 ${plan.filter((step) => !step.table).length}조각, 표 ${tables}개)`,
       { jobId },
     );
+
+    /**
+     * 조각 하나하나는 "성공" 판정을 받았어도 전체를 놓고 보면 거의 안 들어간
+     * 채로 저장되는 사고가 있었다. 조각 붙여넣기가 절반쯤 들어간 것도 성공으로
+     * 치는 문턱(위 pasteThreshold)이 헐거웠던 탓인데, 문턱을 고쳐도 완전히
+     * 없앨 수 있다고 장담할 수 없는 자동화라 마지막에 한 번 더 통째로 잰다.
+     *
+     * 실제로 들어간 글자 수가 넣으려던 글자 수의 절반에도 못 미치면
+     * "제목 + 썸네일만 있고 본문은 텅 빈" 초안을 조용히 저장하지 않고,
+     * 여기서 실패로 던져 재시도(또는 실패 표시)로 넘긴다.
+     */
+    const bodyGrowth = (await bodyTextLength(scope)) - bodyStartLen;
+    if (expectedChars > 0 && bodyGrowth < expectedChars * 0.5) {
+      throw new Error(
+        `본문이 거의 들어가지 않았습니다 (실제 ${bodyGrowth}자 / 필요 ${expectedChars}자). `
+        + '에디터 붙여넣기가 대부분 실패한 것으로 보여 저장하지 않고 재시도합니다.',
+      );
+    }
 
     // 저장 직전에 한 번에 맞춘다. 붙여넣기마다 하면 그때그때 선택을 잡느라 느리고,
     // 어차피 마지막에 전체를 한 번 훑으면 중간에 가운데로 들어온 것까지 다 잡힌다.
