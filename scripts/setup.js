@@ -24,4 +24,4 @@ console.log(session.loggedIn
   ? `[확인] 네이버 세션 있음${session.blogId ? ` · ${session.blogId}` : ' (블로그 아이디 미확인)'}`
   : '[대기] 네이버 로그인이 아직 없습니다. 대시보드 1번 칸에서 로그인하세요.');
 
-console.log('\n준비가 끝났으면 npm start 로 대시보드를 실행하세요.');
+console.log('\n준비가 끝났으면 npm start 로 대시보드를 실행하고, 2번 칸에 큰 주제와 개수를 넣으세요.');

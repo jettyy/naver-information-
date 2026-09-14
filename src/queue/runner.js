@@ -1,7 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { STATUS, updateJob, nextPending, stats } from '../lib/store.js';
+import {
+  STATUS, updateJob, nextPending, stats, addTopics, listJobs, cancelPendingJobs,
+} from '../lib/store.js';
+import {
+  REQUEST_STATUS, nextRequest, updateRequest, finishRequest, getRequest, requestStats,
+} from '../lib/requests.js';
 import { getSettings } from '../lib/settings.js';
+import { discoverTopics } from '../content/discover.js';
+import { recordTopics } from '../lib/history.js';
 import { generatePost, countChars } from '../content/generator.js';
 import { summarize } from '../content/quality.js';
 import { renderThumbnail } from '../content/thumbnail.js';
@@ -19,15 +26,30 @@ const state = {
   currentJobId: null,
   abort: null,
   waitUntil: null,
+
+  // 지금 처리 중인 주문. 목표와 진행 건수는 주문 자체에 들어 있다.
+  currentRequestId: null,
+  // 이번 실행에서 임시저장에 성공한 총 건수 (주문에 상관없이).
+  saved: 0,
+  discovering: false,
 };
 
 export function getRunnerState() {
+  const request = state.currentRequestId ? getRequest(state.currentRequestId) : null;
   return {
     running: state.running,
     paused: state.paused,
     currentJobId: state.currentJobId,
     waitUntil: state.waitUntil,
+    saved: state.saved,
+    discovering: state.discovering,
+    // 화면 맨 위에 "지금 무엇을 하고 있는지" 한 줄로 띄우기 위한 값들.
+    currentRequestId: state.currentRequestId,
+    bigTopic: request?.bigTopic || '',
+    goal: request?.targetCount || 0,
+    requestSaved: request?.saved || 0,
     stats: stats(),
+    requests: requestStats(),
   };
 }
 
@@ -41,6 +63,15 @@ function broadcast() {
  * preview.html 을 브라우저로 열어 전체를 복사하면 에디터에 그대로 붙여넣을 수 있고,
  * post.md 는 내용을 읽거나 다른 곳으로 옮길 때 쓰는 보관본이다.
  */
+/** 본문을 조립할 때 쓰는 설정. 보관본과 실제 저장이 같은 값을 쓰게 한 곳에 둔다. */
+function bodyOptionsFor() {
+  const settings = getSettings();
+  return {
+    sourcesHeading: settings.research.sourcesHeading,
+    appendTags: settings.post.appendTags,
+  };
+}
+
 function archivePost(job, post, thumbnailPath) {
   ensureDirs();
   const base = `${slugify(job.topic, 30)}-${job.id}`;
@@ -52,11 +83,7 @@ function archivePost(job, post, thumbnailPath) {
     fs.copyFileSync(thumbnailPath, path.join(dir, thumbName));
   }
 
-  const settings = getSettings();
-  const bodyOptions = {
-    sourcesHeading: settings.research.sourcesHeading,
-    appendTags: settings.post.appendTags,
-  };
+  const bodyOptions = bodyOptionsFor();
   // 실제로 에디터에 붙여넣는 것과 같은 HTML.
   const content = buildIntroHtml(post) + buildBodyHtml(post, bodyOptions);
 
@@ -102,7 +129,7 @@ async function processJob(job) {
       updateJob(job.id, { status: STATUS.RESEARCHING, message: '웹에서 최신 자료를 찾는 중...' });
     },
     onCompliance: () => {
-      updateJob(job.id, { status: STATUS.CHECKING, message: '준수 검사에서 걸린 부분을 고쳐 쓰는 중...' });
+      updateJob(job.id, { status: STATUS.CHECKING, message: '품질 검사에서 걸린 부분을 고쳐 쓰는 중...' });
     },
   });
 
@@ -155,7 +182,7 @@ async function processJob(job) {
     if (settings.quality.blockOnFail) {
       throw new Error(`품질 검사 미통과로 저장하지 않았습니다: ${detail}`);
     }
-    logger.warn(`[${job.topic}] 준수 미통과 항목이 남아 있습니다: ${detail}`, { jobId: job.id });
+    logger.warn(`[${job.topic}] 품질 미통과 항목이 남아 있습니다: ${detail}`, { jobId: job.id });
   }
 
   updateJob(job.id, { status: STATUS.THUMBNAIL, message: '썸네일 만드는 중...' });
@@ -175,10 +202,7 @@ async function processJob(job) {
     post,
     thumbnailPath: thumb.filePath,
     jobId: job.id,
-    bodyOptions: {
-      sourcesHeading: settings.research.sourcesHeading,
-      appendTags: settings.post.appendTags,
-    },
+    bodyOptions: bodyOptionsFor(),
   });
 
   // 저장 완료 표시(토스트)를 못 잡았어도 저장은 됐을 수 있다.
@@ -211,9 +235,106 @@ function shorten(message, max = 160) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+/**
+ * 대기 중인 주제가 떨어졌을 때 큰 주제로 다시 발굴해 채운다.
+ *
+ * 목표까지 남은 건수보다 조금 넉넉히 받아 온다. 주제 하나가 거절당하거나
+ * 실패할 수 있어서, 딱 맞춰 받아 오면 매번 다시 발굴하러 나가야 한다.
+ * 발굴은 검색이 여러 번 도는 비싼 호출이라 횟수를 줄이는 편이 낫다.
+ *
+ * @returns {Promise<number>} 실제로 작업 목록에 들어간 건수
+ */
+async function refillQueue(request) {
+  const settings = getSettings();
+  const remaining = Math.max(1, request.targetCount - request.saved);
+  const want = Math.min(
+    Math.max(settings.discover.batchSize, remaining),
+    remaining + 2,
+  );
+
+  state.discovering = true;
+  broadcast();
+  try {
+    // 아직 안 쓴 대기 주제도 제외 목록에 넣는다. 목록에 있는데 또 골라 오면
+    // addTopics 가 걸러내긴 하지만, 애초에 다른 주제를 골라 오는 편이 낫다.
+    const exclude = listJobs().map((job) => job.topic);
+    const result = await discoverTopics(request.bigTopic, {
+      want,
+      exclude,
+      signal: state.abort?.signal,
+    });
+
+    if (!result.picks.length) {
+      logger.warn(
+        `[${request.bigTopic}] 새로 쓸 만한 주제를 찾지 못했습니다. `
+        + '큰 주제를 조금 넓히거나, 설정에서 관심도 점수 하한을 낮춰 보세요.',
+      );
+      return 0;
+    }
+
+    // 실제로 글을 썼는지와 무관하게 발굴한 시점에 기록한다.
+    // 실패한 주제를 다음 발굴에서 또 골라 와 또 실패하는 일을 막는다.
+    recordTopics(request.bigTopic, result.picks);
+    const added = addTopics(result.picks, request.id);
+    updateRequest(request.id, {
+      discovered: request.discovered + added.length,
+      message: `주제 ${added.length}건을 찾았습니다.`,
+    });
+    logger.info(`[${request.bigTopic}] 주제 ${added.length}건을 작업 목록에 추가했습니다.`);
+    return added.length;
+  } finally {
+    state.discovering = false;
+    broadcast();
+  }
+}
+
+/**
+ * 한 주문이 주제를 몇 건까지 찾아올 수 있는지.
+ *
+ * 목표를 채울 때까지 도는 구조라, 글이 전부 실패하면(네이버 로그인이 풀렸다든지)
+ * "찾아오고 → 실패하고 → 다시 찾아오고" 를 끝없이 반복하게 된다. 주제는 계속
+ * 늘어나는데 저장된 글은 하나도 안 늘어나는 상태다. 그럴 때 멈출 선이다.
+ */
+export const discoverCapFor = (request) => Math.max(10, (request?.targetCount || 0) * 2 + 5);
+
+/**
+ * 다음에 무엇을 할지 정한다.
+ *
+ * 이 판단이 틀리면 두 가지 중 하나가 난다. 목표를 못 채우고 일찍 끝나거나,
+ * 아니면 끝없이 돌면서 검색 호출만 태운다. 둘 다 자는 동안 벌어지는 일이라
+ * 판단만 따로 떼어 놓고 자체 점검에서 확인한다.
+ *
+ * @param {object|null} request  지금 처리 중인 주문 (없으면 null)
+ * @returns {'process'|'discover'|'finish-request'|'give-up-request'|'stop-empty'}
+ */
+export function planNextStep({ hasPending, request }) {
+  // 주문이 없으면 손으로 넣은 주제만 쓰고 끝낸다. (예전 방식)
+  if (!request) return hasPending ? 'process' : 'stop-empty';
+
+  // 목표를 채웠다. 넉넉히 받아 둔 주제가 남아 있어도 여기서 이 주문을 닫는다.
+  // 그래야 다음 주문으로 넘어간다.
+  if (request.saved >= request.targetCount) return 'finish-request';
+
+  if (hasPending) return 'process';
+
+  // 계속 찾아오는데 저장이 안 된다. 이 주문은 포기하고 다음으로 간다.
+  if (request.discovered >= discoverCapFor(request)) return 'give-up-request';
+
+  return 'discover';
+}
+
+/** 글 하나가 저장됐을 때 그 주제를 데려온 주문의 몫으로 센다. */
+function countForRequest(job, field) {
+  const request = job.requestId ? getRequest(job.requestId) : null;
+  if (!request) return null;
+  return updateRequest(request.id, { [field]: (request[field] || 0) + 1 });
+}
+
 async function loop() {
   let processed = 0;
   let consecutiveFailures = 0;
+  // 발굴을 나갔는데 한 건도 못 건진 횟수. 주문이 바뀌면 다시 0부터 센다.
+  let emptyDiscoveries = 0;
 
   while (state.running) {
     if (state.paused) {
@@ -221,15 +342,114 @@ async function loop() {
       continue;
     }
 
+    // 주문 대기열의 맨 앞을 가져온다. 처리하는 동안에도 뒤에 계속 쌓일 수 있다.
+    const request = nextRequest();
+    if (request?.id !== state.currentRequestId) {
+      state.currentRequestId = request?.id || null;
+      emptyDiscoveries = 0;
+      if (request && request.status !== REQUEST_STATUS.RUNNING) {
+        updateRequest(request.id, {
+          status: REQUEST_STATUS.RUNNING,
+          message: '주제를 찾는 중...',
+        });
+        logger.step(
+          `[${request.bigTopic}] 주문을 시작합니다 — ${request.targetCount}건 임시저장 목표`,
+        );
+      }
+      broadcast();
+    }
+
     const job = nextPending();
-    if (!job) {
-      logger.info('대기 중인 주제가 없습니다. 실행을 마칩니다.');
+    const step = planNextStep({ hasPending: Boolean(job), request });
+
+    if (step === 'stop-empty') {
+      logger.info('대기 중인 주문과 주제가 모두 없습니다. 실행을 마칩니다.');
       break;
+    }
+
+    // 목표를 채웠다. 넉넉히 받아 둔 주제가 남아 있으면 건너뜀으로 정리하고
+    // 다음 주문으로 넘어간다.
+    if (step === 'finish-request') {
+      const left = cancelPendingJobs(
+        request.id,
+        `목표 ${request.targetCount}건을 채워 이 주제는 쓰지 않았습니다.`,
+      );
+      finishRequest(
+        request.id,
+        REQUEST_STATUS.DONE,
+        `${request.saved}건 임시저장 완료${left ? ` (남은 주제 ${left}건은 건너뜀)` : ''}`,
+      );
+      logger.info(
+        `[${request.bigTopic}] 목표한 ${request.targetCount}건을 모두 임시저장했습니다.`
+        + `${left ? ` 남은 주제 ${left}건은 쓰지 않습니다.` : ''}`,
+      );
+      continue;
+    }
+
+    if (step === 'give-up-request') {
+      const left = cancelPendingJobs(request.id, '이 주문을 멈춰서 쓰지 않았습니다.');
+      finishRequest(
+        request.id,
+        REQUEST_STATUS.FAILED,
+        `주제 ${request.discovered}건을 찾았지만 ${request.saved}건만 저장됐습니다.`,
+      );
+      logger.error(
+        `[${request.bigTopic}] 주제를 ${request.discovered}건이나 찾았는데 `
+        + `임시저장된 글은 ${request.saved}건뿐이라 이 주문을 멈춥니다. `
+        + '네이버 로그인이 풀렸거나 품질 검사 설정에 문제가 있을 수 있습니다. '
+        + `작업표의 실패 메시지를 확인해 주세요.${left ? ` (남은 주제 ${left}건 정리)` : ''}`,
+      );
+      continue;
+    }
+
+    // 대기 주제가 떨어졌다. 이 주문의 큰 주제로 웹 검색을 돌려 새로 찾아온다.
+    if (step === 'discover') {
+      let added = 0;
+      try {
+        added = await refillQueue(request);
+      } catch (error) {
+        if (error.rateLimited) {
+          state.paused = true;
+          logger.error(`주제를 찾는 중 사용량 한도에 걸려 일시정지했습니다. ${error.message}`);
+          broadcast();
+          continue;
+        }
+        if (/중지했습니다/.test(error.message)) break;
+        logger.error(`주제 발굴에 실패했습니다: ${error.message}`);
+      }
+
+      if (!added) {
+        emptyDiscoveries += 1;
+        // 두 번 연달아 빈손이면 더 돌려도 같다. 이 주문은 접고 다음으로 간다.
+        if (emptyDiscoveries >= 2) {
+          finishRequest(
+            request.id,
+            REQUEST_STATUS.FAILED,
+            `새 주제를 찾지 못했습니다. (${request.saved}/${request.targetCount}건 저장)`,
+          );
+          logger.warn(
+            `[${request.bigTopic}] 두 번 연속으로 새 주제를 찾지 못해 이 주문을 접습니다. `
+            + '큰 주제를 조금 넓히거나 관심도 점수 하한을 낮춰 보세요.',
+          );
+          continue;
+        }
+        await sleep(3000);
+      }
+      // 방금 넣은 주제를 집으러 위로 돌아간다.
+      continue;
     }
 
     try {
       await processJob(job);
       consecutiveFailures = 0;
+      state.saved += 1;
+      const owner = countForRequest(job, 'saved');
+      broadcast();
+      if (owner) {
+        logger.info(
+          `[${owner.bigTopic}] 진행 ${owner.saved}/${owner.targetCount}건 임시저장 완료.`,
+        );
+      }
     } catch (error) {
       const message = error.message || String(error);
 
@@ -255,6 +475,7 @@ async function loop() {
           `[${job.topic}] AI가 이 주제를 거절해 건너뜁니다. ${shorten(error.reason || message, 200)}`,
           { jobId: job.id },
         );
+        countForRequest(job, 'failed');
         continue;
       }
 
@@ -277,6 +498,7 @@ async function loop() {
       } else {
         updateJob(job.id, { status: STATUS.FAILED, message: shorten(message), detail });
         logger.error(`[${job.topic}] 실패: ${shorten(message, 200)}`, { jobId: job.id });
+        countForRequest(job, 'failed');
       }
 
       // 설정이 잘못됐거나 연결이 끊긴 상태라면 남은 주제도 전부 같은 이유로 실패한다.
@@ -298,7 +520,13 @@ async function loop() {
 
     processed += 1;
     if (!state.running) break;
-    if (!nextPending()) break;
+    // 끝낼 때가 됐는지는 위에서 한 곳에서만 판단한다. 여기서는 더 쓸 글이
+    // 남았는지만 보고, 남았으면 다음 글까지 사이를 띄운다.
+    const next = planNextStep({
+      hasPending: Boolean(nextPending()),
+      request: nextRequest(),
+    });
+    if (next !== 'process' && next !== 'discover') continue;
 
     // 짧은 시간에 몰아서 올리면 네이버가 연속 자동화로 볼 수 있다. 사이를 띄운다.
     const { delayMinSec, delayMaxSec } = getSettings().run;
@@ -318,14 +546,25 @@ async function loop() {
   state.running = false;
   state.paused = false;
   state.currentJobId = null;
+  state.currentRequestId = null;
   state.waitUntil = null;
+  state.discovering = false;
   broadcast();
-  logger.info(`실행 종료. 이번 실행에서 ${processed}건 처리했습니다.`);
+  logger.info(
+    `실행 종료. 이번 실행에서 ${processed}건 처리했고 ${state.saved}건을 임시저장했습니다.`,
+  );
 }
 
 export function start() {
   if (state.running) return { ok: false, message: '이미 실행 중입니다.' };
-  if (!nextPending()) return { ok: false, message: '대기 중인 주제가 없습니다.' };
+
+  // 주문도 없고 손으로 넣은 주제도 없으면 할 일이 없다.
+  if (!nextRequest() && !nextPending()) {
+    return {
+      ok: false,
+      message: '2번 칸에 큰 주제를 넣고 [확인]을 누르거나, 직접 주제를 추가한 뒤에 실행해 주세요.',
+    };
+  }
 
   const session = readSessionInfo();
   if (!session.loggedIn) {
@@ -343,14 +582,34 @@ export function start() {
   state.running = true;
   state.paused = false;
   state.abort = new AbortController();
+  state.saved = 0;
   broadcast();
-  logger.info(`실행 시작 - 대기 ${stats().pending}건`);
+
+  const { remaining, open } = requestStats();
+  logger.info(
+    open
+      ? `실행 시작 - 주문 ${open}건, 앞으로 쓸 글 ${remaining}편 (대기 주제 ${stats().pending}건)`
+      : `실행 시작 - 대기 주제 ${stats().pending}건`,
+  );
   loop().catch((error) => {
     logger.error(`실행 루프 오류: ${error.message}`);
     state.running = false;
+    state.discovering = false;
     broadcast();
   });
   return { ok: true };
+}
+
+/**
+ * 주문을 넣었을 때 알아서 돌기 시작하게 한다.
+ *
+ * [확인] 을 누른 사람이 [실행] 을 또 눌러야 한다면 대기열을 만든 뜻이 없다.
+ * 이미 돌고 있으면 아무 것도 하지 않는다. 새 주문은 지금 도는 루프가
+ * 차례가 됐을 때 알아서 집어 간다.
+ */
+export function ensureRunning() {
+  if (state.running) return { ok: true, already: true };
+  return start();
 }
 
 export function pause() {

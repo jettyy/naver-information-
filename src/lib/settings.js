@@ -28,6 +28,18 @@ export const DEFAULT_SETTINGS = {
     appendTags: true,            // 글 끝에 #태그 줄을 붙일지 (네이버 검색 유입)
   },
 
+  // 주제 발굴 (큰 주제 → 웹 검색 → 글 주제)
+  discover: {
+    bigTopic: '',                // 사용자가 입력하는 큰 주제. 예: "2026년 부동산 정책"
+    targetCount: 5,              // 이 주문으로 몇 건을 임시저장하고 끝낼지
+    batchSize: 5,                // 한 번 발굴할 때 받아올 주제 개수
+    maxSearches: 6,              // 발굴 한 번당 검색 횟수 상한
+    recencyDays: 30,             // 며칠 이내 정보를 "최신" 으로 볼지
+    minScore: 40,                // 관심도 점수가 이보다 낮으면 버린다 (0~100)
+    region: '한국',              // 어느 지역 독자 기준으로 찾을지
+    timeoutMs: 420000,           // 검색이 여러 번 돈다. 넉넉히.
+  },
+
   // 자료 조사 (웹 검색)
   research: {
     enabled: true,               // 글을 쓰기 전에 웹 검색으로 사실을 모은다
@@ -60,6 +72,8 @@ export const DEFAULT_SETTINGS = {
     modelCacheHours: 24,         // 모델 목록을 다시 받아오는 주기
 
     // full 모드에서 글자가 깨졌는지 이미지를 다시 읽어 확인한다.
+    // 한 번 더 호출하지만 글자 출력이라 값이 거의 안 든다.
+    // 깨졌으면 한 번 다시 그리고, 그래도 깨지면 HTML 썸네일로 물러선다.
     verifyText: true,
 
     style: 'flat',               // flat | soft | photo | line (overlay 모드용)
@@ -72,19 +86,22 @@ export const DEFAULT_SETTINGS = {
     width: 1200,
     height: 630,
     style: 'auto',               // auto | bold | gradient | minimal | editorial
-    insert: true,                // 도입부 뒤에 그림으로 넣기
+    insert: true,                // 도입부 뒤에 그림으로 넣기 (네이버가 이걸 대표 이미지로 씀)
     emoji: false,                // 정보성 글은 기호를 자제하는 편이 안전하다
   },
 
   // 실행
   run: {
-    delayMinSec: 30,             // 네이버는 연속 자동화에 민감해서 워드프레스보다 길게 잡는다.
+    // 네이버는 연속 자동화에 민감해서 워드프레스보다 길게 잡는다.
+    delayMinSec: 30,
     delayMaxSec: 90,
     maxRetries: 1,
     // 연속으로 이만큼 실패하면 실행을 멈춘다. 0 이면 **멈추지 않고 끝까지** 간다.
+    // 기본은 0 이다. 한두 주제가 안 된다고 나머지를 세워두는 것보다,
+    // 끝까지 돌려놓고 실패한 것만 다시 보는 편이 낫다.
     stopAfterFailures: 0,
     headless: false,             // 네이버는 창을 띄우는 편이 더 안전하다.
-    slowMoMs: 0,                 // 동작 사이 지연 (디버깅용)
+    slowMoMs: 0,                 // 동작 사이 지연 (자동화를 눈으로 따라가며 고칠 때)
     screenshotOnError: true,     // 자동화가 실패하면 화면을 찍어 둔다
     chromiumPath: '',            // 쓸 크로미움 경로 (비우면 자동)
   },

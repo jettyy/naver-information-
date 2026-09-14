@@ -4,7 +4,12 @@ import { bus, recentLogs, logger, logRaw, logFile } from './lib/events.js';
 import {
   getSettings, saveSettings, publicSettings, DEFAULT_SETTINGS,
 } from './lib/settings.js';
-import { listJobs, addTopics, removeJob, clearJobs, resetJob, stats, STATUS } from './lib/store.js';
+import {
+  listJobs, addTopics, removeJob, clearJobs, resetJob, stats, STATUS, cancelPendingJobs,
+} from './lib/store.js';
+import {
+  listRequests, addRequest, getRequest, removeRequest, clearRequests,
+} from './lib/requests.js';
 import { parseTopics, normalizeBlogId } from './lib/util.js';
 import {
   openLoginWindow, verifySession, readSessionInfo, logout, closeContext,
@@ -13,7 +18,9 @@ import { previewThumbnailHtml } from './content/thumbnail.js';
 import { checkClaude, runClaude } from './ai/claude.js';
 import { MODELS } from './ai/models.js';
 import { RULES } from './content/quality.js';
-import { runResearch } from './content/research.js';
+import { runResearch, isUsableUrl } from './content/research.js';
+import { discoverTopics } from './content/discover.js';
+import { recordTopics, historyStats, clearHistory } from './lib/history.js';
 import {
   generateBackground, pickAspectRatio, getImageModels, verifyKoreanText,
 } from './content/imagegen.js';
@@ -52,9 +59,11 @@ app.get('/api/state', wrap(async (req, res) => {
     examples: listExamples(),
     session: readSessionInfo(),
     jobs: listJobs(),
+    requests: listRequests(),
     runner: runner.getRunnerState(),
     logs: recentLogs(),
     statuses: STATUS,
+    history: historyStats(getSettings().discover.bigTopic),
   });
 }));
 
@@ -120,6 +129,136 @@ app.post('/api/blog-id', wrap(async (req, res) => {
   saveSettings({ blogId });
   logger.info(`블로그 아이디를 ${blogId} 로 설정했습니다.`);
   res.json({ ok: true, settings: publicSettings(), session: readSessionInfo() });
+}));
+
+/* ---------- 주문 대기열 (큰 주제 + 개수) ---------- */
+
+/**
+ * 큰 주제 하나를 대기열에 넣는다.
+ *
+ * **검색을 기다리지 않고 바로 응답한다.** 실제 검색은 실행 루프가 차례가 됐을 때
+ * 돌린다. 그래야 [확인] 을 누른 사람이 곧바로 다음 주제를 입력할 수 있다.
+ */
+app.post('/api/requests', wrap(async (req, res) => {
+  const bigTopic = String(req.body?.bigTopic || '').trim();
+  if (!bigTopic) {
+    res.status(400).json({ ok: false, message: '큰 주제를 입력해 주세요.' });
+    return;
+  }
+  const targetCount = Number(req.body?.targetCount) || getSettings().discover.targetCount;
+  const request = addRequest({ bigTopic, targetCount });
+
+  // 다음에 열었을 때 같은 개수가 그대로 있도록 기본값만 기억해 둔다.
+  saveSettings({ discover: { targetCount: request.targetCount } });
+  logger.info(`주문 추가 — "${request.bigTopic}" ${request.targetCount}건`);
+
+  // 네이버에 로그인돼 있으면 바로 돌기 시작한다. [실행] 을 또 누를 필요가 없다.
+  const started = runner.ensureRunning();
+  if (!started.ok) {
+    logger.warn(`대기열에 넣었지만 아직 실행하지 못합니다: ${started.message}`);
+  }
+
+  res.json({
+    ok: true,
+    request,
+    requests: listRequests(),
+    started: started.ok,
+    startMessage: started.ok ? '' : started.message,
+  });
+}));
+
+app.delete('/api/requests/:id', wrap(async (req, res) => {
+  const request = getRequest(req.params.id);
+  if (request) {
+    // 아직 안 쓴 주제까지 같이 걷어낸다. 주문만 지우면 주제가 남아서 계속 써진다.
+    const left = cancelPendingJobs(request.id, '주문을 취소해 쓰지 않았습니다.');
+    removeRequest(request.id);
+    logger.info(
+      `주문 취소 — "${request.bigTopic}"${left ? ` (대기 주제 ${left}건 정리)` : ''}`,
+    );
+  }
+  res.json({ ok: true, requests: listRequests(), jobs: listJobs() });
+}));
+
+app.post('/api/requests/clear', wrap(async (req, res) => {
+  res.json({ ok: true, requests: clearRequests(req.body?.onlyFinished !== false) });
+}));
+
+/* ---------- 주제 발굴 (큰 주제 → 최신 정보 → 글 주제) ---------- */
+
+/**
+ * 큰 주제로 어떤 글감이 나오는지 **작업 목록에 넣지 않고** 먼저 보여준다.
+ *
+ * 100건을 자동으로 돌리기 전에 "이 큰 주제로 무슨 글이 나오는지" 를
+ * 한 번은 눈으로 봐야 한다. 큰 주제가 너무 넓거나 좁으면 여기서 드러난다.
+ */
+app.post('/api/discover/preview', wrap(async (req, res) => {
+  const bigTopic = String(req.body?.bigTopic || '').trim() || getSettings().discover.bigTopic;
+  if (!bigTopic) {
+    res.status(400).json({ ok: false, message: '큰 주제를 입력해 주세요.' });
+    return;
+  }
+  // 눌러서 확인한 큰 주제를 그대로 저장한다. 실행할 때 다시 적지 않게.
+  saveSettings({ discover: { bigTopic } });
+
+  try {
+    const result = await discoverTopics(bigTopic, { want: Number(req.body?.want) || undefined });
+    res.json({
+      ok: true,
+      bigTopic,
+      picks: result.picks,
+      landscape: result.landscape,
+      searches: result.searches,
+      received: result.received,
+      dropped: result.dropped,
+      settings: publicSettings(),
+    });
+  } catch (error) {
+    logger.error(`주제 발굴 실패: ${error.message}`);
+    res.json({ ok: true, failed: true, message: error.message, settings: publicSettings() });
+  }
+}));
+
+/** 미리 본 주제를 작업 목록에 넣는다. 화면에서 고른 것만 받는다. */
+app.post('/api/discover/add', wrap(async (req, res) => {
+  const picks = Array.isArray(req.body?.picks) ? req.body.picks : [];
+  if (!picks.length) {
+    res.status(400).json({ ok: false, message: '추가할 주제를 하나 이상 골라 주세요.' });
+    return;
+  }
+  const bigTopic = String(req.body?.bigTopic || '').trim();
+
+  // 화면에서 돌아온 값을 그대로 저장하지 않는다. 길이와 형태를 다시 맞춘다.
+  const clean = picks
+    .map((pick) => ({
+      topic: String(pick?.topic || '').trim().slice(0, 120),
+      why: String(pick?.why || '').trim().slice(0, 300),
+      score: Math.max(0, Math.min(100, Number(pick?.score) || 0)),
+      searchTerms: (Array.isArray(pick?.searchTerms) ? pick.searchTerms : [])
+        .map((term) => String(term).trim().slice(0, 60)).filter(Boolean).slice(0, 6),
+      freshness: String(pick?.freshness || '').trim().slice(0, 60),
+      sources: (Array.isArray(pick?.sources) ? pick.sources : [])
+        .map((url) => String(url).trim()).filter(isUsableUrl).slice(0, 3),
+      bigTopic,
+    }))
+    .filter((pick) => pick.topic);
+
+  if (!clean.length) {
+    res.status(400).json({ ok: false, message: '추가할 주제를 하나 이상 골라 주세요.' });
+    return;
+  }
+
+  recordTopics(bigTopic, clean);
+  const added = addTopics(clean);
+  logger.info(`발굴한 주제 ${added.length}건을 작업 목록에 추가했습니다.`);
+  res.json({ ok: true, added: added.length, skipped: clean.length - added.length, jobs: listJobs() });
+}));
+
+/** 이미 다룬 주제 기록을 지운다. 같은 소재를 처음부터 다시 쓰고 싶을 때. */
+app.post('/api/discover/history/clear', wrap(async (req, res) => {
+  clearHistory();
+  logger.info('발굴 기록을 지웠습니다. 앞으로는 예전에 쓴 주제도 다시 고를 수 있습니다.');
+  res.json({ ok: true, history: historyStats(getSettings().discover.bigTopic) });
 }));
 
 /* ---------- 주제 ---------- */

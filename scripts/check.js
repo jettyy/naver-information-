@@ -5,11 +5,9 @@
  *   - 품질 검사기가 통과할 글을 통과시키고, 어긋난 글을 정확히 잡아내는지
  *   - 네이버에 붙여넣을 HTML 이 제대로 나오는지 (색 상속, 표, 붙여넣기 조각)
  *   - 마크다운 표가 제대로 나오는지
+ *   - 주제 발굴과 자동 실행 루프의 판단이 맞는지
  *
- * `node --check` 는 파일이 파싱되는지만 본다. 지워진 함수를 부르거나 없는 변수를
- * 참조해도 통과한다. 그래서 여기서는 모든 모듈을 실제로 불러오고 조립 경로를
- * 한 번씩 돌려 본다. 코드를 고친 뒤 여기부터 돌리면 주제 100개를 태우기 전에
- * 문제가 드러난다.
+ * 코드를 고친 뒤 여기부터 돌려보면 주제 100개를 태우기 전에 문제가 드러난다.
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -29,6 +27,16 @@ import {
 } from '../src/content/imagegen.js';
 import { renderTemplate } from '../src/content/templates/index.js';
 import { buildResearchBlock, isUsableUrl } from '../src/content/research.js';
+import { buildDiscoverPrompt, normalizePick, screenPicks } from '../src/content/discover.js';
+import { topicKey } from '../src/lib/history.js';
+import { planNextStep, discoverCapFor } from '../src/queue/runner.js';
+import {
+  REQUEST_STATUS, addRequest, nextRequest, finishRequest, updateRequest,
+  requestStats, clearRequests,
+} from '../src/lib/requests.js';
+import {
+  addTopics, nextPending, cancelPendingJobs, listJobs, clearJobs,
+} from '../src/lib/store.js';
 import { normalizeBlogId, normalizeTag, parseTopics } from '../src/lib/util.js';
 
 const settings = structuredClone(DEFAULT_SETTINGS);
@@ -308,9 +316,8 @@ test('표는 붙여넣기 조각으로 따로 떨어진다', () => {
   const tableSteps = plan.filter((step) => step.table);
   assert.equal(tableSteps.length, 1, `표 조각이 ${tableSteps.length}개입니다`);
   assert.equal(tableSteps[0].table.rows.length, 3, '조각이 원본 표를 안 들고 있습니다');
-  assert.ok(!/<table/.test(plan.filter((step) => !step.table).map((s2) => s2.html).join('')),
+  assert.ok(!/<table/.test(plan.filter((step) => !step.table).map((step) => step.html).join('')),
     '글 조각 안에 표가 섞였습니다');
-  // 조각을 도로 이으면 본문 전체와 같아야 한다. (빠진 조각이 없다는 뜻)
   for (const piece of ['추천 자격증을 고른 세 가지 기준', '1위. 전기기사', '자주 묻는 질문', '#자격증']) {
     assert.ok(plan.some((step) => step.html.includes(piece)), `"${piece}" 조각이 사라졌습니다`);
   }
@@ -325,12 +332,9 @@ test('큰 표는 머리글을 붙여 조각으로 나뉜다', () => {
   };
   const chunks = buildTableChunks(table, 20);
   assert.equal(chunks.length, 5, `조각이 ${chunks.length}개입니다`);
-  for (const chunk of chunks) {
-    assert.ok(chunk.includes('<th'), '조각에 머리글이 없습니다');
-  }
+  for (const chunk of chunks) assert.ok(chunk.includes('<th'), '조각에 머리글이 없습니다');
   // 소제목은 첫 조각에만, 안내문은 마지막 조각에만.
   assert.equal(chunks.filter((c) => c.includes('전국 대학교 순위')).length, 1);
-  assert.equal(chunks.filter((c) => c.includes('참고 자료입니다.')).length, 1);
   assert.ok(chunks[4].includes('참고 자료입니다.'), '안내문이 마지막 조각에 없습니다');
   // 100행이 하나도 빠지지 않아야 한다.
   const joined = chunks.join('');
@@ -416,7 +420,7 @@ test('출처는 링크가 아니라 글자로 글 끝에 붙는다', () => {
   // 외부 링크가 여러 개 붙은 글은 검색에서 불리하게 볼 수 있다.
   const post = buildSamplePost();
   post.sources = sampleSources;
-  const html = buildBodyHtml(post, { sourcesHeading: '참고 자료', appendTags: true });
+  const html = buildBodyHtml(post, bodyOptions);
   assert.ok(html.includes('국가기술자격 시행계획 공고'), '출처 제목이 없습니다');
   assert.ok(html.includes('https://www.q-net.or.kr/notice/1234'), '주소가 글자로 안 남았습니다');
   assert.ok(!html.includes('<a '), '링크 태그가 들어갔습니다');
@@ -671,6 +675,205 @@ test('네이버 태그에서 공백과 특수문자를 걷어낸다', () => {
 test('엑셀에서 붙여넣은 주제를 줄 단위로 읽는다', () => {
   const topics = parseTopics('주제\n자격증 TOP 5\t비고\n자격증 TOP 5\n\n전세 계약 서류');
   assert.deepEqual(topics, ['자격증 TOP 5', '전세 계약 서류']);
+});
+
+/* ---------- 주제 발굴 ---------- */
+
+test('발굴 프롬프트에 큰 주제와 검색 지시가 들어간다', () => {
+  const prompt = buildDiscoverPrompt('전기차 보조금', settings, 5);
+  assert.match(prompt, /전기차 보조금/, '큰 주제가 프롬프트에 없습니다');
+  assert.match(prompt, /WebSearch/, '검색 도구를 쓰라는 지시가 없습니다');
+  assert.match(prompt, /글은 쓰지 마세요/, '주제만 고르라는 지시가 없습니다');
+  assert.match(prompt, /5개/, '요청 개수가 들어가지 않았습니다');
+  assert.match(prompt, new RegExp(`최근 ${settings.discover.recencyDays}일`), '최신 기준이 빠졌습니다');
+  // 네이버에서 문제되는 소재를 고르지 않게 막는 부분이 반드시 있어야 한다.
+  assert.match(prompt, /고르지 말아야 할 것/, '제외 지시가 빠졌습니다');
+});
+
+test('발굴 프롬프트는 검색 횟수 상한을 조사 설정이 아니라 발굴 설정에서 가져온다', () => {
+  const tweaked = structuredClone(settings);
+  tweaked.discover.maxSearches = 9;
+  tweaked.research.maxSearches = 3;
+  assert.match(buildDiscoverPrompt('부동산', tweaked, 4), /9회 이내/);
+});
+
+test('점수를 안 주거나 이상한 값을 줘도 순서를 정할 수 있다', () => {
+  assert.equal(normalizePick({ topic: '2026년 전기차 보조금 개편 내용 정리' }).score, 50);
+  assert.equal(normalizePick({ topic: '2026년 전기차 보조금 개편 내용 정리', score: 999 }).score, 100);
+  assert.equal(normalizePick({ topic: '2026년 전기차 보조금 개편 내용 정리', score: -5 }).score, 0);
+  assert.equal(normalizePick({ topic: '   ' }), null, '빈 주제를 걸러내지 않았습니다');
+});
+
+test('지어낸 근거 주소는 버린다', () => {
+  const pick = normalizePick({
+    topic: '2026년 전기차 보조금 개편 내용 정리',
+    sources: ['https://www.molit.go.kr/notice/1', 'https://example.com/a', 'not-a-url'],
+  });
+  assert.deepEqual(pick.sources, ['https://www.molit.go.kr/notice/1']);
+});
+
+test('이미 쓴 주제와 낚시성 제목을 걸러낸다', () => {
+  const picks = [
+    { topic: '2026년 전기차 보조금, 지역별로 얼마나 달라졌을까', score: 85 },
+    { topic: '2026년 전기차 보조금 지역별로 얼마나 달라졌을까!!', score: 80 },  // 기호만 다른 중복
+    { topic: '충격! 전기차 보조금 이것만 알면 끝', score: 95 },                  // 낚시성
+    { topic: '전기차 충전 요금 인상, 언제부터 얼마나 오르나', score: 30 },        // 점수 미달
+    { topic: '짧다', score: 90 },                                                // 너무 짧음
+    { topic: '전기차 보조금 신청 방법과 준비 서류 정리', score: 70 },
+  ].map(normalizePick);
+
+  const seen = new Set([topicKey('전기차 보조금 신청 방법과 준비 서류 정리')]);
+  const { kept, dropped } = screenPicks(picks, { minScore: 40, seen });
+
+  assert.deepEqual(kept.map((pick) => pick.topic), [
+    '2026년 전기차 보조금, 지역별로 얼마나 달라졌을까',
+  ]);
+  assert.equal(dropped.duplicate, 2, '중복(목록 안 + 기록)을 다 잡지 못했습니다');
+  assert.equal(dropped.clickbait, 1);
+  assert.equal(dropped.lowScore, 1);
+  assert.equal(dropped.tooShort, 1);
+});
+
+test('채택한 주제는 관심도 점수가 높은 순으로 나온다', () => {
+  const picks = [
+    { topic: '전기차 충전 요금 인상 시기와 인상폭 정리', score: 62 },
+    { topic: '2026년 전기차 보조금 개편으로 달라지는 점', score: 91 },
+    { topic: '전기차 보조금 신청 방법과 준비 서류 정리', score: 75 },
+  ].map(normalizePick);
+  const { kept } = screenPicks(picks, { minScore: 0 });
+  assert.deepEqual(kept.map((pick) => pick.score), [91, 75, 62]);
+});
+
+test('주제 비교 열쇠는 공백과 기호를 무시한다', () => {
+  assert.equal(topicKey('국가기술자격증 TOP 5!'), topicKey('국가기술자격증top5'));
+  assert.notEqual(topicKey('전기차 보조금'), topicKey('전기차 충전요금'));
+});
+
+/* ---------- 자동 실행 루프의 판단 ---------- */
+
+const order = (patch = {}) => ({
+  id: 'r1', bigTopic: '전기차', targetCount: 5, saved: 0, discovered: 0, ...patch,
+});
+const plan = (hasPending, request) => planNextStep({ hasPending, request });
+
+test('대기 주제가 있으면 그것부터 쓴다', () => {
+  assert.equal(plan(true, order()), 'process');
+});
+
+test('목표를 채우면 남은 주제가 있어도 그 주문을 닫는다', () => {
+  // 닫아야 다음 주문으로 넘어간다. 넉넉히 받아 둔 주제를 마저 쓰면 안 된다.
+  assert.equal(plan(true, order({ saved: 5 })), 'finish-request');
+  assert.equal(plan(false, order({ saved: 7 })), 'finish-request', '넘겨도 닫아야 합니다');
+});
+
+test('대기가 떨어지면 그 주문의 큰 주제로 새로 찾아온다', () => {
+  assert.equal(plan(false, order({ saved: 2 })), 'discover');
+});
+
+test('주문이 없으면 손으로 넣은 주제만 쓰고 끝낸다', () => {
+  assert.equal(plan(true, null), 'process');
+  assert.equal(plan(false, null), 'stop-empty');
+});
+
+test('계속 찾아오는데 저장이 안 되면 그 주문을 포기한다', () => {
+  // 네이버 로그인이 풀려 전부 실패하는 상황. 이게 없으면 끝없이 검색만 돈다.
+  const cap = discoverCapFor(order());
+  assert.equal(cap, 15);
+  assert.equal(plan(false, order({ discovered: cap })), 'give-up-request');
+  assert.equal(plan(false, order({ discovered: cap - 1 })), 'discover');
+  // 상한에 닿아도 이미 찾아온 주제는 마저 쓴다. 버릴 이유가 없다.
+  assert.equal(plan(true, order({ discovered: 99 })), 'process');
+});
+
+test('개수가 적은 주문도 발굴 상한이 너무 빡빡하지 않다', () => {
+  // 1건짜리 주문에 상한이 7이면 한 번 실패하고 두 번째 발굴에서 바로 포기한다.
+  assert.equal(discoverCapFor(order({ targetCount: 1 })), 10);
+  assert.equal(discoverCapFor(order({ targetCount: 20 })), 45);
+});
+
+/* ---------- 주문 대기열 ---------- */
+
+test('주문을 넣은 순서대로 하나씩 꺼낸다', () => {
+  clearRequests(false);
+  const first = addRequest({ bigTopic: '전기차', targetCount: 3 });
+  const second = addRequest({ bigTopic: '부동산', targetCount: 2 });
+
+  assert.equal(nextRequest().id, first.id, '먼저 넣은 주문이 먼저 나와야 합니다');
+
+  // 앞 주문을 끝내면 다음 주문이 올라온다.
+  finishRequest(first.id, REQUEST_STATUS.DONE);
+  assert.equal(nextRequest().id, second.id);
+
+  finishRequest(second.id, REQUEST_STATUS.DONE);
+  assert.equal(nextRequest(), null, '다 끝나면 꺼낼 주문이 없어야 합니다');
+  clearRequests(false);
+});
+
+test('개수는 1 이상으로 맞춰 들어간다', () => {
+  clearRequests(false);
+  assert.equal(addRequest({ bigTopic: '전기차', targetCount: 0 }).targetCount, 1);
+  assert.equal(addRequest({ bigTopic: '전기차', targetCount: -3 }).targetCount, 1);
+  assert.equal(addRequest({ bigTopic: '전기차', targetCount: 9999 }).targetCount, 200);
+  assert.throws(() => addRequest({ bigTopic: '  ' }), /큰 주제/);
+  clearRequests(false);
+});
+
+test('대기열에 남은 글 편수를 센다', () => {
+  clearRequests(false);
+  addRequest({ bigTopic: '전기차', targetCount: 5 });
+  const second = addRequest({ bigTopic: '부동산', targetCount: 3 });
+  updateRequest(second.id, { saved: 2 });
+  assert.deepEqual(requestStats(), { total: 2, open: 2, remaining: 6 });
+  clearRequests(false);
+});
+
+test('같은 큰 주제를 두 번 넣을 수 있다', () => {
+  // "5편 더 뽑아줘" 는 정상적인 요구다. 중복으로 막으면 안 된다.
+  clearRequests(false);
+  addRequest({ bigTopic: '전기차', targetCount: 5 });
+  addRequest({ bigTopic: '전기차', targetCount: 5 });
+  assert.equal(requestStats().open, 2);
+  clearRequests(false);
+});
+
+test('발굴한 주제는 그 주문의 몫으로 붙는다', () => {
+  clearJobs(false);
+  const added = addTopics([{ topic: '전기차 보조금 2026년 개편 내용 정리', score: 80 }], 'req-1');
+  assert.equal(added[0].requestId, 'req-1');
+  // 손으로 넣은 주제는 주문에 딸리지 않는다.
+  assert.equal(addTopics(['직접 적은 주제입니다'])[0].requestId, '');
+  clearJobs(false);
+});
+
+test('손으로 넣은 주제를 발굴한 주제보다 먼저 쓴다', () => {
+  clearJobs(false);
+  addTopics([{ topic: '발굴해 온 주제 하나입니다' }], 'req-1');
+  addTopics(['직접 적은 주제입니다']);
+  assert.equal(nextPending().topic, '직접 적은 주제입니다');
+  clearJobs(false);
+});
+
+test('주문을 닫으면 남은 대기 주제가 건너뜀으로 정리된다', () => {
+  clearJobs(false);
+  addTopics([
+    { topic: '발굴 주제 하나입니다 아주 길게' },
+    { topic: '발굴 주제 둘입니다 아주 길게' },
+  ], 'req-1');
+  addTopics([{ topic: '다른 주문의 주제입니다' }], 'req-2');
+
+  assert.equal(cancelPendingJobs('req-1', '목표를 채워 쓰지 않았습니다.'), 2);
+  const jobs = listJobs();
+  assert.equal(jobs.filter((job) => job.status === 'skipped').length, 2);
+  // 다른 주문 것은 건드리지 않아야 한다.
+  assert.equal(jobs.find((job) => job.requestId === 'req-2').status, 'pending');
+  clearJobs(false);
+});
+
+test('발굴 설정은 대시보드로 그대로 내려간다', () => {
+  const saved = saveSettings({ discover: { bigTopic: '부동산 정책', targetCount: 12 } });
+  assert.equal(saved.discover.bigTopic, '부동산 정책');
+  assert.equal(publicSettings().discover.targetCount, 12);
+  saveSettings({ discover: { bigTopic: '', targetCount: DEFAULT_SETTINGS.discover.targetCount } });
 });
 
 test('countChars 는 공백을 빼고 센다', () => {

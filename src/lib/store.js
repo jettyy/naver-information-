@@ -61,16 +61,37 @@ export function getJob(id) {
   return load().find((job) => job.id === id) || null;
 }
 
-export function addTopics(topics) {
+/**
+ * 주제를 작업 목록에 넣는다.
+ *
+ * 문자열을 주면 사람이 직접 적은 주제로, 객체를 주면 발굴해 온 주제로 본다.
+ * 발굴해 온 것은 왜 골랐는지(why)와 관심도 점수를 함께 남겨서,
+ * 작업표에서 "이 주제는 왜 여기 있나" 를 바로 확인할 수 있게 한다.
+ *
+ * requestId 는 이 주제를 데려온 주문의 번호다. 이게 있어야 글 하나가
+ * 저장됐을 때 어느 주문의 몫인지 셀 수 있다. 직접 적은 주제는 비어 있다.
+ */
+export function addTopics(topics, requestId = '') {
   const list = load();
   const existing = new Set(list.map((job) => job.topic.toLowerCase()));
   const added = [];
-  for (const topic of topics) {
+  for (const entry of topics) {
+    const pick = typeof entry === 'string' ? { topic: entry } : (entry || {});
+    const topic = String(pick.topic || '').trim();
+    if (!topic) continue;
     if (existing.has(topic.toLowerCase())) continue;
     existing.add(topic.toLowerCase());
     const job = {
       id: shortId(),
       topic,
+      requestId,
+      // 발굴로 들어온 주제에만 채워진다. 직접 적은 주제는 빈 값이다.
+      bigTopic: pick.bigTopic || '',
+      why: pick.why || '',
+      score: Number(pick.score) || 0,
+      searchTerms: pick.searchTerms || [],
+      freshness: pick.freshness || '',
+      seedSources: pick.sources || [],
       status: STATUS.PENDING,
       message: '',
       detail: '',            // 오류 전문 (표에는 줄여서 띄우고 여기에 원문을 담는다)
@@ -128,8 +149,41 @@ export function resetJob(id) {
   return updateJob(id, { status: STATUS.PENDING, message: '', detail: '', attempts: 0 });
 }
 
+/**
+ * 다음에 쓸 주제.
+ *
+ * 직접 적은 주제(주문에 딸리지 않은 것)를 먼저 본다. 꼭 쓰고 싶어서
+ * 손으로 넣은 것이라, 발굴해 온 주제 뒤에서 기다리게 두면 안 된다.
+ */
 export function nextPending() {
-  return load().find((job) => job.status === STATUS.PENDING) || null;
+  const list = load();
+  const pending = (job) => job.status === STATUS.PENDING;
+  return list.find((job) => pending(job) && !job.requestId)
+    || list.find(pending)
+    || null;
+}
+
+/**
+ * 한 주문에 딸린 대기 주제를 걷어낸다.
+ *
+ * 발굴할 때 목표보다 조금 넉넉히 받아 오기 때문에, 목표를 채우고 나면
+ * 쓰지 않을 주제가 남는다. 그대로 두면 다음 주문으로 넘어가지 못하고
+ * 남은 것부터 계속 쓰게 된다. 지우지 않고 건너뜀으로 남겨서,
+ * 무엇이 왜 안 쓰였는지 작업표에서 보이게 한다.
+ */
+export function cancelPendingJobs(requestId, message) {
+  if (!requestId) return 0;
+  let count = 0;
+  for (const job of load()) {
+    if (job.requestId !== requestId || job.status !== STATUS.PENDING) continue;
+    Object.assign(job, { status: STATUS.SKIPPED, message, updatedAt: nowIso() });
+    count += 1;
+  }
+  if (count) {
+    persist();
+    push('jobs', load());
+  }
+  return count;
 }
 
 export function stats() {

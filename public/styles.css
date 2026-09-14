@@ -107,6 +107,8 @@ textarea:focus, input:focus, select:focus { outline: 2px solid #b8ecd0; border-c
 .grid label.check input { width: auto; }
 .grid label.check .sub { flex-basis: 100%; }
 .grid label .sub { font-size: 11.5px; color: var(--muted); font-weight: 400; line-height: 1.5; }
+/* 칸 제목과 그 옆의 강조 배지를 한 줄에 둔다. (세로 배치라 그냥 두면 배지가 한 줄을 다 차지한다) */
+.grid label .label-line { display: block; }
 
 /* ---------- 품질 규칙 목록 ---------- */
 
@@ -249,6 +251,85 @@ td.model-cell { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .inline input { width: 100%; }
   .inline { flex-wrap: wrap; }
 }
+
+/* ---------- 주제 발굴 ---------- */
+
+#s-big-topic { border-color: var(--brand); background: #fafdfe; font-size: 15px; font-weight: 600; }
+
+/* 큰 주제 + 개수 + [확인] 을 한 줄에. 누르고 바로 다음 주제를 치는 칸이다. */
+.order-row { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 10px; }
+.order-row label {
+  display: flex; flex-direction: column; gap: 5px;
+  font-size: 12.5px; color: var(--muted);
+}
+.order-topic { flex: 1 1 auto; min-width: 0; }
+.order-count { flex: 0 0 120px; }
+.order-go { flex: none; height: 39px; padding: 0 26px; font-size: 14px; }
+
+.order-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.order-list li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border: 1px solid var(--line);
+  border-radius: 9px; margin-bottom: 6px; background: #fbfcfc;
+  font-size: 12.5px;
+}
+.order-list li.done, .order-list li.failed, .order-list li.stopped { opacity: .6; }
+.order-list li.running { border-color: var(--brand); background: #f4fbfd; }
+.order-no { flex: none; width: 18px; color: var(--muted); text-align: right; }
+.order-name {
+  flex: 0 1 220px; font-size: 13.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.order-badge {
+  flex: none; padding: 2px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; background: #eceff1; color: var(--muted);
+}
+.order-badge.running { background: #e6f2f7; color: #14607f; }
+.order-badge.done { background: #e7f5ec; color: var(--ok); }
+.order-badge.failed, .order-badge.stopped { background: #fdecec; color: #b3302a; }
+.order-progress {
+  flex: 0 1 120px; height: 5px; border-radius: 999px;
+  background: #e3e8ea; overflow: hidden;
+}
+.order-progress span { display: block; height: 100%; background: var(--brand); }
+.order-count-text { flex: none; color: var(--muted); white-space: nowrap; }
+.order-msg {
+  flex: 1 1 0; min-width: 0; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .order-row { flex-wrap: wrap; }
+  .order-topic { flex-basis: 100%; }
+  .order-count { flex: 1 1 120px; }
+  .order-list li { flex-wrap: wrap; }
+  .order-name { flex-basis: calc(100% - 90px); }
+  .order-msg { flex-basis: 100%; }
+}
+#discover-result { max-height: 260px; overflow-y: auto; }
+
+.pick-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.pick-list li {
+  padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 9px; margin-bottom: 7px; background: #fbfcfc;
+}
+.pick-head { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.pick-head input { width: auto; flex: none; }
+.pick-score {
+  flex: none; min-width: 44px; text-align: center;
+  padding: 2px 7px; border-radius: 999px; background: #e6f2f7;
+  color: #14607f; font-size: 11.5px; font-weight: 700;
+}
+.pick-topic { font-size: 13.5px; font-weight: 600; line-height: 1.5; }
+.pick-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  margin: 7px 0 0 32px; font-size: 12px; color: var(--muted); line-height: 1.6;
+}
+.pick-why { flex: 1 1 320px; min-width: 0; }
+.pick-terms { white-space: nowrap; }
+.pick-meta a { color: var(--brand); }
+
+td.score-cell { white-space: nowrap; }
 
 /* ---------- 자료 조사 ---------- */
 

@@ -19,6 +19,8 @@ export const PROFILE_DIR = path.join(DATA_DIR, 'browser-profile');
 
 export const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 export const JOBS_FILE = path.join(DATA_DIR, 'jobs.json');
+export const HISTORY_FILE = path.join(DATA_DIR, 'topic-history.json');
+export const REQUESTS_FILE = path.join(DATA_DIR, 'requests.json');
 export const SESSION_FILE = path.join(DATA_DIR, 'naver-session.json');
 export const STORAGE_FILE = path.join(DATA_DIR, 'naver-cookies.json');
 export const IMAGE_MODEL_FILE = path.join(DATA_DIR, 'image-models.json');
