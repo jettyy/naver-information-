@@ -12,6 +12,15 @@ import { renderTableImages } from '../content/thumbnail.js';
 const MODIFIER = process.platform === 'darwin' ? 'Meta' : 'Control';
 
 /**
+ * 이만큼도 안 들어갔으면 저장하지 않는다.
+ *
+ * 최소 분량 설정(기본 1,800자)보다 한참 낮게 잡는다. 여기서 막으려는 것은
+ * "품질이 모자란 글" 이 아니라 "본문이 사실상 비어 있는 글" 이다.
+ * 제목 + 기사 카드 한 장만 남은 글이 딱 이 선에 걸린다.
+ */
+const MIN_BODY_CHARS = 300;
+
+/**
  * 에디터가 iframe(#mainFrame) 안에 있을 수도, 페이지 자체일 수도 있다.
  * 못 찾으면 null 을 돌려준다 (주소를 바꿔가며 여러 번 시도하기 위해).
  */
@@ -153,13 +162,70 @@ export function pasteThreshold(text) {
 }
 
 /**
+ * 본문 맨 끝에 커서를 놓고 편집 영역에 포커스를 준다.
+ *
+ * **이게 없으면 붙여넣기가 통째로 허공에 뿌려진다.** 사진을 넣거나 팝업이
+ * 떴다 사라지면 포커스가 에디터 밖으로 나가는데, 그 상태에서는
+ *   - 합성 paste 는 선택 영역이 없어 에디터가 무시하고
+ *   - Ctrl+V 와 타이핑은 아예 다른 곳으로 가고
+ * 셋 다 "조용히" 아무 일도 안 일어난다. 그러고도 저장은 되니까
+ * 제목만 있고 본문은 텅 빈 글이 임시저장 목록에 쌓였다.
+ *
+ * @returns {Promise<boolean>} 편집 영역을 잡았는지
+ */
+async function focusBodyEnd(scope) {
+  return scope
+    .evaluate(() => {
+      const root = document.querySelector('.se-main-container');
+      if (!root) return false;
+
+      // 제목은 별도 영역(se-documentTitle)이다. 본문 쪽 편집 영역만 고른다.
+      const editables = [...root.querySelectorAll('[contenteditable="true"]')]
+        .filter((node) => !node.closest('.se-documentTitle, .se-section-documentTitle'));
+      const last = editables[editables.length - 1];
+      if (!last) return false;
+
+      last.focus();
+      const range = document.createRange();
+      range.selectNodeContents(last);
+      range.collapse(false);          // 끝으로 접는다. 앞에 쓴 글을 덮지 않게.
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      return root.contains(document.activeElement);
+    })
+    .catch(() => false);
+}
+
+/**
  * 서식을 살려 넣는 유일하게 안정적인 방법이 HTML 붙여넣기다.
  * 1) 합성 paste 이벤트 -> 2) 실제 클립보드 + Ctrl+V -> 3) 평문 타이핑 순으로 시도한다.
+ *
+ * 각 단계 전에 커서를 본문 끝으로 다시 잡고, 앞 단계가 **일부만** 넣었으면
+ * 되돌린 뒤 다음 단계로 간다. 되돌리지 않고 다음 단계로 넘어가면 같은 글이
+ * 두 번 들어간다.
  */
 async function pasteHtml(page, scope, html) {
   const text = htmlToPlainText(html);
   const before = await bodyTextLength(scope);
   const threshold = pasteThreshold(text);
+  const grown = async () => (await bodyTextLength(scope)) - before;
+
+  if (!(await focusBodyEnd(scope))) {
+    throw new Error(
+      '본문 편집 영역을 잡지 못했습니다. 에디터가 준비되지 않았거나 팝업이 떠 있습니다.',
+    );
+  }
+
+  /** 일부만 들어간 것을 되돌린다. 못 되돌리면 다음 단계를 건너뛰어 중복을 막는다. */
+  const undoPartial = async () => {
+    for (let attempt = 0; attempt < 3 && (await grown()) > 0; attempt += 1) {
+      await page.keyboard.press(`${MODIFIER}+Z`);
+      await page.waitForTimeout(300);
+    }
+    return (await grown()) <= 0;
+  };
 
   const trySynthetic = async () => {
     await scope.evaluate(({ html: source, text: plain }) => {
@@ -176,7 +242,7 @@ async function pasteHtml(page, scope, html) {
       }));
     }, { html, text });
     await page.waitForTimeout(700);
-    return (await bodyTextLength(scope)) > before + threshold;
+    return (await grown()) >= threshold;
   };
 
   const tryClipboard = async () => {
@@ -189,7 +255,7 @@ async function pasteHtml(page, scope, html) {
     }, { html, text });
     await page.keyboard.press(`${MODIFIER}+V`);
     await page.waitForTimeout(900);
-    return (await bodyTextLength(scope)) > before + threshold;
+    return (await grown()) >= threshold;
   };
 
   try {
@@ -198,14 +264,26 @@ async function pasteHtml(page, scope, html) {
     logger.warn(`합성 붙여넣기 실패: ${error.message.split('\n')[0]}`);
   }
 
+  if (!(await undoPartial())) {
+    logger.warn('일부만 들어간 붙여넣기를 되돌리지 못해 여기서 멈춥니다. (중복 방지)');
+    return 'partial';
+  }
+
   try {
+    await focusBodyEnd(scope);
     if (await tryClipboard()) return 'clipboard';
   } catch (error) {
     logger.warn(`클립보드 붙여넣기 실패: ${error.message.split('\n')[0]}`);
   }
 
+  if (!(await undoPartial())) {
+    logger.warn('일부만 들어간 붙여넣기를 되돌리지 못해 여기서 멈춥니다. (중복 방지)');
+    return 'partial';
+  }
+
   // 마지막 수단: 서식 없이 평문으로라도 넣는다.
   logger.warn('서식 붙여넣기에 실패해 평문으로 입력합니다.');
+  await focusBodyEnd(scope);
   for (const line of text.split('\n')) {
     if (line.trim()) {
       try {
@@ -466,10 +544,30 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
         + '에디터 붙여넣기가 대부분 실패한 것으로 보여 저장하지 않고 재시도합니다.',
       );
     }
+    // 비율과 무관한 절대 하한선. 글자 수가 이보다 적으면 정보성 글일 수가 없다.
+    // 기사 카드 한 장만 남은 글이 딱 여기에 걸린다.
+    if (bodyGrowth < MIN_BODY_CHARS) {
+      throw new Error(
+        `본문이 ${bodyGrowth}자뿐입니다 (최소 ${MIN_BODY_CHARS}자). `
+        + '저장하지 않고 재시도합니다.',
+      );
+    }
 
     // 저장 직전에 한 번에 맞춘다. 붙여넣기마다 하면 그때그때 선택을 잡느라 느리고,
     // 어차피 마지막에 전체를 한 번 훑으면 중간에 가운데로 들어온 것까지 다 잡힌다.
+    const beforeAlign = await bodyTextLength(scope);
     await alignBodyLeft(page, scope, jobId);
+
+    // 정렬은 Ctrl+A 로 본문을 통째로 선택한 뒤 버튼을 누른다. 버튼을 못 찾아
+    // 단축키로 넘어갔을 때 엉뚱한 동작이 일어나면 선택된 본문이 통째로
+    // 날아갈 수 있다. 저장하기 전에 글이 그대로 있는지 확인한다.
+    const afterAlign = await bodyTextLength(scope);
+    if (afterAlign < beforeAlign * 0.9) {
+      throw new Error(
+        `정렬 과정에서 본문이 줄었습니다 (${beforeAlign}자 → ${afterAlign}자). `
+        + '저장하지 않고 재시도합니다.',
+      );
+    }
 
     const confirmed = await saveDraft(page, scope);
     return {

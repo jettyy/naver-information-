@@ -17,11 +17,28 @@ import { escapeHtml } from '../lib/util.js';
  */
 
 /**
+ * 본문 글자에서 주소(https://...)를 걷어내고 호스트만 남긴다.
+ *
+ * 네이버 에디터는 본문 글자 안의 주소를 스스로 찾아내 **링크 카드로 갈아끼운다.**
+ * 그러면 그 문단에 적어둔 글이 통째로 사라지고 기사 카드만 남는다.
+ * 프롬프트에서 "본문에 URL 을 적지 마라" 고 지시하지만 모델이 어길 때가 있어서,
+ * 에디터로 나가는 마지막 길목인 여기서 한 번 더 막는다.
+ *
+ *   https://www.q-net.or.kr/notice/1234  ->  q-net.or.kr
+ */
+export function stripUrls(text) {
+  return String(text ?? '').replace(
+    /\bhttps?:\/\/(?:www\.)?([^\s<>"']+)/gi,
+    (match, rest) => String(rest).split(/[/?#]/)[0] || match,
+  );
+}
+
+/**
  * AI 는 문단 안에서 <b> 만 쓰도록 지시받는다.
  * 그래서 전부 이스케이프한 뒤 <b> 만 되살려 태그 주입을 막는다.
  */
 function inline(text) {
-  return escapeHtml(text)
+  return escapeHtml(stripUrls(text))
     .replace(/&lt;b&gt;/gi, '<b>')
     .replace(/&lt;\/b&gt;/gi, '</b>')
     .replace(/&lt;strong&gt;/gi, '<b>')
@@ -190,24 +207,44 @@ function faqHtml(faq) {
 }
 
 /**
+ * 주소에서 사람이 알아볼 만한 이름만 뽑는다. (news.naver.com/foo -> news.naver.com)
+ *
+ * 스킴(https://)과 경로를 떼어내는 것이 핵심이다. 아래 sourcesHtml 의 설명 참고.
+ */
+function sourceLabel(source) {
+  const url = String(source?.url || '');
+  const host = url.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split(/[/?#]/)[0];
+  return host || '출처 미상';
+}
+
+/**
  * 글 끝의 참고 자료 목록.
  *
  * 워드프레스판은 <a> 링크 목록으로 넣었지만 여기서는 **글자로만** 적는다.
- * 네이버 에디터는 붙여넣은 링크를 링크 카드로 부풀려 넣고, 외부 링크가 여러 개
- * 붙은 글은 검색에서 불리하게 볼 수 있다. 주소를 글자로 남겨 두면 읽는 사람이
- * 원문을 찾아갈 수 있으면서 그런 위험은 지지 않는다.
+ * 네이버 에디터는 링크를 링크 카드로 부풀려 넣고, 외부 링크가 여러 개 붙은
+ * 글은 검색에서 불리하게 볼 수 있기 때문이다.
+ *
+ * 그런데 `<a>` 태그를 안 쓰는 것만으로는 부족했다. **네이버는 본문 글자 안의
+ * 주소(https://...)를 스스로 찾아내 링크 카드로 바꾼다.** 특히 문단 끝에 주소가
+ * 오면 그 문단을 통째로 카드로 갈아끼운다. 그래서 출처 줄이 카드 하나로
+ * 바뀌고, 앞에 적어둔 제목과 발행처는 사라진 채 기사 카드만 남는 사고가 났다.
+ * (제목 + 기사 카드 하나만 있는 글이 임시저장되던 원인이다)
+ *
+ * 그래서 **본문에는 주소를 아예 넣지 않는다.** 제목과 발행처, 날짜만 적는다.
+ * 전체 주소는 `research.json` 과 `preview.html` 에 그대로 남아 있어서
+ * 발행 전에 원문을 대조하는 데는 아무 지장이 없다.
  */
 function sourcesHtml(sources, headingText) {
   if (!sources?.length) return '';
 
   const lines = sources
     .map((source) => {
-      const title = source.title || source.url;
+      const title = source.title || sourceLabel(source);
       const meta = [source.publisher, source.date]
         .filter(Boolean)
         .filter((part, index, all) => all.indexOf(part) === index)
         .join(', ');
-      const text = `${title}${meta ? ` (${meta})` : ''} — ${source.url}`;
+      const text = `${title}${meta ? ` (${meta})` : ''}`;
       return (
         `<p style="margin:0 0 5px 0; line-height:1.7; font-size:13.5px; `
         + `color:#5b6773; text-align:left;">${inline(text)}</p>`

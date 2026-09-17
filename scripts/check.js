@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { checkCompliance, countChars, buildRuleBlock } from '../src/content/quality.js';
 import {
   buildIntroHtml, buildBodyHtml, buildBodyPlan, buildTableChunks,
-  buildTableHtml, htmlToPlainText, buildPreviewHtml,
+  buildTableHtml, htmlToPlainText, buildPreviewHtml, stripUrls,
 } from '../src/content/naver.js';
 import { buildMarkdown } from '../src/content/markdown.js';
 import { DEFAULT_SETTINGS, saveSettings, getSettings, publicSettings } from '../src/lib/settings.js';
@@ -416,18 +416,39 @@ test('조사 자료 블록에 사실과 미확인 항목이 들어간다', () =>
   assert.equal(buildResearchBlock(null), '', '자료가 없으면 빈 문자열이어야 합니다');
 });
 
-test('출처는 링크가 아니라 글자로 글 끝에 붙는다', () => {
-  // 네이버 에디터는 붙여넣은 링크를 링크 카드로 부풀리고,
-  // 외부 링크가 여러 개 붙은 글은 검색에서 불리하게 볼 수 있다.
+test('출처는 제목과 발행처만 남고 주소는 본문에 들어가지 않는다', () => {
+  // 네이버는 본문 글자 안의 주소를 찾아내 **링크 카드로 갈아끼운다.**
+  // 그러면 그 문단의 글이 사라지고 기사 카드만 남는다. 실제로 제목 + 기사
+  // 카드 하나만 있는 글이 임시저장되던 원인이라, 본문에는 주소를 안 넣는다.
   const post = buildSamplePost();
   post.sources = sampleSources;
   const html = buildBodyHtml(post, bodyOptions);
   assert.ok(html.includes('국가기술자격 시행계획 공고'), '출처 제목이 없습니다');
-  assert.ok(html.includes('https://www.q-net.or.kr/notice/1234'), '주소가 글자로 안 남았습니다');
+  assert.ok(html.includes('한국산업인력공단'), '발행처가 없습니다');
   assert.ok(!html.includes('<a '), '링크 태그가 들어갔습니다');
+  assert.ok(!/https?:\/\//.test(html), `본문에 주소가 남아 있습니다: ${html.match(/https?:\/\/\S+/)}`);
   // 출처는 마무리 문단보다 뒤에 와야 읽는 흐름이 끊기지 않는다.
   assert.ok(html.indexOf('국가기술자격 시행계획 공고') > html.indexOf('자주 묻는 질문'),
     '출처가 본문 앞에 있습니다');
+});
+
+test('AI가 본문에 주소를 적어도 에디터로 나가기 전에 걷어낸다', () => {
+  // 프롬프트로 막지만 모델이 어길 때가 있다. 마지막 길목에서 한 번 더 막는다.
+  const post = buildSamplePost();
+  post.intro[0] = '자세한 내용은 https://www.q-net.or.kr/notice/1234 에서 확인하세요.';
+  post.sections[0].paragraphs[0] = 'http://example.go.kr/a/b?c=1 를 참고했습니다.';
+  const html = buildIntroHtml(post) + buildBodyHtml(post, bodyOptions);
+  assert.ok(!/https?:\/\//.test(html), '본문에 주소가 그대로 남았습니다');
+  // 지우지 말고 호스트만 남겨야 읽는 사람이 어디 자료인지 알 수 있다.
+  assert.ok(html.includes('q-net.or.kr'), '호스트까지 사라졌습니다');
+  assert.ok(html.includes('example.go.kr'), '호스트까지 사라졌습니다');
+});
+
+test('stripUrls 는 주소만 호스트로 줄이고 나머지 글자는 건드리지 않는다', () => {
+  assert.equal(stripUrls('https://www.q-net.or.kr/notice/1234'), 'q-net.or.kr');
+  assert.equal(stripUrls('출처: http://news.naver.com/a?b=1 입니다'), '출처: news.naver.com 입니다');
+  assert.equal(stripUrls('주소가 없는 평범한 문장입니다.'), '주소가 없는 평범한 문장입니다.');
+  assert.equal(stripUrls(''), '');
 });
 
 test('출처 제목에 든 HTML 은 이스케이프된다', () => {
