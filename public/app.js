@@ -613,11 +613,21 @@ for (const id of ['s-target-count', 's-batch-size', 's-recency', 's-min-score', 
 }
 
 /**
- * [확인] — 대기열에 넣고 바로 입력칸을 비운다.
+ * 큰 주제 하나를 대기열에 넣는다. [확인] 과 여러 줄 붙여넣기가 이 함수를 같이 쓴다.
  *
  * 검색이 끝나기를 기다리지 않는다. 서버는 주문만 받아 두고 즉시 응답하고,
- * 실제 검색은 실행 루프가 차례가 됐을 때 돌린다. 그래서 누르자마자
- * 다음 주제를 이어서 넣을 수 있다.
+ * 실제 검색은 실행 루프가 차례가 됐을 때 돌린다.
+ */
+async function queueBigTopic(bigTopic, targetCount) {
+  const data = await api('/api/requests', { method: 'POST', body: { bigTopic, targetCount } });
+  state.requests = data.requests || [];
+  return data;
+}
+
+/**
+ * [확인] — 대기열에 넣고 바로 입력칸을 비운다.
+ *
+ * 응답을 기다리는 동안에도 다음 주제를 이어서 넣을 수 있도록 먼저 비운다.
  */
 async function submitOrder() {
   const input = $('s-big-topic');
@@ -625,13 +635,11 @@ async function submitOrder() {
   if (!bigTopic) return toast('큰 주제를 입력해 주세요.');
 
   const targetCount = Number($('s-target-count').value) || 1;
-  // 응답을 기다리는 동안에도 다음 주제를 칠 수 있도록 먼저 비운다.
   input.value = '';
   input.focus();
 
   try {
-    const data = await api('/api/requests', { method: 'POST', body: { bigTopic, targetCount } });
-    state.requests = data.requests || [];
+    const data = await queueBigTopic(bigTopic, targetCount);
     renderOrders();
     renderDiscoverState();
     await refreshState();
@@ -649,6 +657,60 @@ $('btn-order').onclick = submitOrder;
 $('s-big-topic').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') { event.preventDefault(); submitOrder(); }
 });
+
+// 붙여넣을 수 있는 큰 주제 개수의 상한. 이보다 많으면 나눠서 붙여달라고 안내한다.
+const MAX_PASTE_TOPICS = 100;
+
+/**
+ * 큰 주제 칸에 **여러 줄**을 한꺼번에 붙여넣으면, 한 줄씩 잘라 그 줄마다
+ * 따로따로 대기열에 넣는다. (한 줄만 붙여넣을 때는 평소처럼 그 줄이 그대로
+ * 입력칸에 들어간다 — 여기서 아무 것도 하지 않고 브라우저 기본 동작에 맡긴다)
+ *
+ * 엑셀 등에서 여러 칸을 복사해 오면 탭으로 나뉜 경우가 있어 첫 칸만 쓴다.
+ */
+$('s-big-topic').addEventListener('paste', (event) => {
+  const raw = event.clipboardData?.getData('text') || '';
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.split('\t')[0].trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean);
+
+  if (lines.length <= 1) return;   // 한 줄이면 그냥 붙여넣게 둔다.
+  event.preventDefault();
+
+  const topics = lines.slice(0, MAX_PASTE_TOPICS);
+  if (lines.length > MAX_PASTE_TOPICS) {
+    toast(`한 번에 ${MAX_PASTE_TOPICS}개까지만 넣습니다. 나머지 ${lines.length - MAX_PASTE_TOPICS}개는 나눠서 다시 붙여넣어 주세요.`);
+  }
+  queueManyBigTopics(topics);
+});
+
+async function queueManyBigTopics(topics) {
+  const targetCount = Number($('s-target-count').value) || 1;
+  toast(`큰 주제 ${topics.length}개를 대기열에 넣는 중...`);
+
+  let added = 0;
+  const failed = [];
+  for (const bigTopic of topics) {
+    try {
+      await queueBigTopic(bigTopic, targetCount);
+      added += 1;
+    } catch (error) {
+      failed.push(`${bigTopic}: ${error.message}`);
+    }
+  }
+
+  renderOrders();
+  renderDiscoverState();
+  await refreshState();
+
+  if (!failed.length) {
+    toast(`큰 주제 ${added}개를 대기열에 각각 추가했습니다. (각 ${targetCount}건씩)`);
+  } else {
+    toast(`${added}개 추가, ${failed.length}개 실패 — ${failed[0]}`
+      + (failed.length > 1 ? ` 외 ${failed.length - 1}건` : ''));
+  }
+}
 
 $('order-list').addEventListener('click', async (event) => {
   const id = event.target.dataset.orderRemove;
