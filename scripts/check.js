@@ -29,7 +29,9 @@ import { renderTemplate } from '../src/content/templates/index.js';
 import { buildResearchBlock, isUsableUrl } from '../src/content/research.js';
 import {
   buildDiscoverPrompt, normalizePick, screenPicks, buildFallbackTopics, buildBigTopicPrompt,
+  buildFallbackBigTopics,
 } from '../src/content/discover.js';
+import { isBrokenOutput, writeConsole, consoleAlive, log } from '../src/lib/events.js';
 import { topicKey } from '../src/lib/history.js';
 import { planNextStep, discoverCapFor } from '../src/queue/runner.js';
 import {
@@ -808,6 +810,36 @@ test('만든 글감이 이미 쓴 것이어도 빈손으로 돌아가지 않는�
   assert.ok(again.length >= 1, '하나도 못 만들었습니다. 이러면 주문이 중단됩니다.');
 });
 
+test('각도를 다 써도 이미 있는 제목을 그대로 내지 않는다', () => {
+  // 겹치는 제목을 내면 작업 목록에 넣는 단계에서 중복으로 걸러져 결국 0건이 되고,
+  // 주문은 "새 주제를 찾지 못했습니다" 로 똑같이 멈춘다. 제목이 달라야 한다.
+  const seen = new Set(buildFallbackTopics('대학 순위', 30).map((p) => topicKey(p.topic)));
+  const before = seen.size;
+  for (let round = 0; round < 5; round += 1) {
+    const [pick] = buildFallbackTopics('대학 순위', 1, seen);
+    assert.ok(pick, '하나도 못 만들었습니다');
+    assert.ok(pick.topic.length >= 8, `제목이 너무 짧습니다: ${pick.topic}`);
+  }
+  assert.equal(seen.size, before + 5, '같은 제목을 다시 냈습니다');
+});
+
+test('이어서 쓸 분야를 못 받으면 쓰던 분야로 이어 간다', () => {
+  // AI 호출이 어긋났다고 멈추면 "끊김 없이 계속 쓰기" 를 켜 둔 뜻이 없다.
+  const seeds = ['전기차 보조금', '청년 지원금'];
+  const topics = buildFallbackBigTopics(3, new Set([topicKey('청년 지원금')]), seeds);
+  assert.ok(topics.length >= 1, '하나도 못 만들었습니다. 이러면 실행이 멈춥니다.');
+  // 지금 대기열에 있는 분야는 또 넣지 않는다. 넣어봐야 중복이다.
+  assert.ok(!topics.some((item) => topicKey(item.topic) === topicKey('청년 지원금')));
+  assert.ok(topics.some((item) => item.topic === '전기차 보조금'), '쓰던 분야를 안 썼습니다');
+});
+
+test('기록이 하나도 없어도 이어서 쓸 분야가 나온다', () => {
+  // 처음 켠 사람이 주제를 안 넣고 자동 이어가기만 켠 경우다.
+  const topics = buildFallbackBigTopics(3, new Set(), []);
+  assert.equal(topics.length, 3, `${topics.length}건만 만들었습니다`);
+  assert.equal(new Set(topics.map((item) => item.topic)).size, 3, '분야가 겹칩니다');
+});
+
 test('이어서 쓸 큰 주제 프롬프트에 지금까지 쓴 분야가 들어간다', () => {
   const prompt = buildBigTopicPrompt(['전기차 보조금', '청년 지원금'], 3);
   assert.ok(prompt.includes('전기차 보조금'), '씨앗 주제가 안 들어갔습니다');
@@ -977,6 +1009,36 @@ test('발굴 설정은 대시보드로 그대로 내려간다', () => {
 
 test('countChars 는 공백을 빼고 센다', () => {
   assert.equal(countChars({ intro: ['가 나 다'], sections: [], outro: [] }), 3);
+});
+
+// 이 검사는 console.log 를 잠시 망가뜨리고 다시는 화면에 못 쓰게 만든다.
+// 뒤에 오는 검사에 영향이 가지 않도록 맨 마지막에 둔다.
+test('검은 창이 닫혀도 로그가 프로그램을 멈추지 않는다', () => {
+  assert.ok(isBrokenOutput({ code: 'EIO' }), 'EIO 를 못 알아봤습니다');
+  assert.ok(isBrokenOutput({ code: 'EPIPE' }), 'EPIPE 를 못 알아봤습니다');
+  assert.ok(!isBrokenOutput({ code: 'ENOENT' }), '엉뚱한 오류까지 출력 문제로 봤습니다');
+
+  // 검은 창을 닫은 상황을 흉내 낸다. 그 뒤로 화면에 쓰면 write EIO 가 난다.
+  const real = console.log;
+  let writes = 0;
+  console.log = () => {
+    writes += 1;
+    const error = new Error('write EIO');
+    error.code = 'EIO';
+    throw error;
+  };
+  try {
+    assert.doesNotThrow(() => log('info', '창이 닫힌 뒤의 한 줄'), '로그가 예외를 던졌습니다');
+    assert.doesNotThrow(() => log('info', '그다음 한 줄'), '로그가 예외를 던졌습니다');
+  } finally {
+    console.log = real;
+  }
+
+  // 한 번 막히면 다시는 쓰지 않아야 한다. 계속 쓰려 들면 그 오류가 또 로그로 들어와
+  // `예기치 못한 오류: write EIO` 가 끝없이 반복된다. 실제로 그랬다.
+  assert.equal(writes, 1, `화면에 ${writes}번 썼습니다. 한 번이면 충분합니다.`);
+  assert.equal(consoleAlive(), false, '화면 출력이 아직 살아 있다고 봅니다');
+  assert.equal(writeConsole('이건 나가면 안 된다'), false, '막힌 뒤에도 또 썼습니다');
 });
 
 console.log(failures ? `\n실패 ${failures}건\n` : '\n모두 통과했습니다.\n');

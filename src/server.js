@@ -1,6 +1,8 @@
 import express from 'express';
 import { PUBLIC_DIR, THUMB_DIR, OUTPUT_DIR, SHOT_DIR, ensureDirs } from './lib/paths.js';
-import { bus, recentLogs, logger, logRaw, logFile } from './lib/events.js';
+import {
+  bus, recentLogs, logger, logRaw, logFile, isBrokenOutput, markConsoleDead, writeConsole,
+} from './lib/events.js';
 import {
   getSettings, saveSettings, publicSettings, DEFAULT_SETTINGS,
 } from './lib/settings.js';
@@ -514,13 +516,35 @@ const HOST = process.env.HOST || '0.0.0.0';   // IPv4 로 확실히 열어둔다
 
 // 서버가 조용히 죽으면 브라우저에는 "연결 거부"만 뜨고 이유를 알 수 없다.
 // 무슨 일이 있었는지 창에 남기고, 창이 바로 닫히지 않게 붙잡아 둔다.
+let inFatal = false;
+
 function fatal(label, error) {
-  logger.error(`${label}: ${error?.message || error}`);
-  if (error?.stack) {
-    console.error(error.stack);
-    logRaw(error.stack);
+  // 이 함수 안에서 또 오류가 나면 여기로 다시 들어온다. 한 번만 처리한다.
+  if (inFatal) return;
+  inFatal = true;
+  try {
+    // 검은 창을 닫았을 때 나는 오류다. 서버 자체는 멀쩡하다.
+    // 이걸 평소처럼 로그로 남기면 그 로그가 또 같은 오류를 내서 끝없이 돈다.
+    // (화면에 `예기치 못한 오류: write EIO` 가 수십 줄 쌓이던 원인)
+    if (isBrokenOutput(error)) {
+      const first = markConsoleDead();
+      logRaw(`${new Date().toISOString()} [WARN ] 검은 창이 닫혀 화면 출력이 끊겼습니다(${error?.code || error?.errno}). 화면 출력만 끄고 계속 진행합니다.`);
+      if (first) {
+        // 대시보드에는 한 번만 알린다. 웹 화면과 기록 파일은 그대로 돌아간다.
+        logger.warn('검은 창이 닫혀 화면 출력이 끊겼습니다. 대시보드는 그대로 씁니다.');
+      }
+      return;
+    }
+
+    logger.error(`${label}: ${error?.message || error}`);
+    if (error?.stack) {
+      writeConsole(error.stack, 'error');
+      logRaw(error.stack);
+    }
+    writeConsole(`\n기록: ${logFile()}\n창을 닫지 말고 위 내용을 그대로 알려주세요.\n`, 'error');
+  } finally {
+    inFatal = false;
   }
-  console.error(`\n기록: ${logFile()}\n창을 닫지 말고 위 내용을 그대로 알려주세요.\n`);
 }
 
 // 여기서 잡지 않으면 프로세스가 아무 말 없이 종료되고,

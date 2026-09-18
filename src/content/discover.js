@@ -227,9 +227,19 @@ export function buildFallbackTopics(bigTopic, want, seen = new Set()) {
     if (out.length >= limit) break;
   }
 
-  // 그래도 하나도 없으면 겹치는 것을 그대로 쓴다.
-  // 여기서 빈손으로 돌아가면 주문이 중단된다. 겹치는 글이 낫다.
-  if (!out.length) out.push(make(`${year}년 ${month}월 ${bigTopic} 총정리`));
+  // 각도를 다 썼다. 그래도 빈손으로 돌아가면 주문이 중단된다.
+  //
+  // 여기서 **이미 있는 제목을 그대로** 내면 작업 목록에 넣는 단계에서
+  // 중복으로 걸러져 결국 0건이 되고, 주문은 똑같이 멈춘다.
+  // 그래서 날짜를 붙이고, 그것도 겹치면 번호를 올려 가며 반드시 새 제목을 만든다.
+  if (!out.length) {
+    const day = now.getDate();
+    const base = `${year}년 ${month}월 ${day}일 기준 ${bigTopic} 총정리`;
+    let title = base;
+    for (let n = 2; seen.has(topicKey(title)) && n <= 60; n += 1) title = `${base} ${n}`;
+    seen.add(topicKey(title));
+    out.push(make(title));
+  }
   return out;
 }
 
@@ -260,15 +270,40 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
 
   logger.step(`[${topic}] 최신 정보에서 글 주제를 찾는 중... (${ask}개 요청)`);
 
-  const reply = await runClaudeJson(
-    buildDiscoverPrompt(topic, settings, ask),
-    {
-      systemPrompt: DISCOVER_SYSTEM,
-      tools: WEB_TOOLS,
-      timeoutMs: settings.discover.timeoutMs,
-      signal,
-    },
-  );
+  /*
+   * 검색이 실패해도 여기서 던지지 않는다.
+   *
+   * 예전에는 claude 호출이 한 번 어긋나면(시간 초과, JSON 이 아닌 응답, CLI 오류)
+   * 그대로 예외가 올라갔고, 부르는 쪽에서는 "0건" 으로 보였다. 그게 두 번 이어지면
+   * 주문이 통째로 **중단**됐다. 실제로 주문 하나가 "새 주제를 찾지 못했습니다
+   * (0/5건 저장)" 로 멈춘 원인이 이것이다.
+   *
+   * 검색이 안 되는 것과 쓸 글이 없는 것은 다른 일이다. 검색이 안 되면
+   * 큰 주제로 글감을 직접 만들어서라도 계속 쓴다. 대신 왜 검색이 안 됐는지는
+   * 로그에 분명히 남겨서, 사람이 보면 원인을 알 수 있게 한다.
+   *
+   * 중지 요청과 사용량 한도는 예외다. 그건 "계속 쓰면 안 되는" 신호라 그대로 올린다.
+   */
+  let reply = { data: null, searches: 0, model: '' };
+  let aiError = '';
+  try {
+    reply = await runClaudeJson(
+      buildDiscoverPrompt(topic, settings, ask),
+      {
+        systemPrompt: DISCOVER_SYSTEM,
+        tools: WEB_TOOLS,
+        timeoutMs: settings.discover.timeoutMs,
+        signal,
+      },
+    );
+  } catch (error) {
+    if (error?.rateLimited || /중지했습니다/.test(error?.message || '')) throw error;
+    aiError = String(error?.message || error).split('\n')[0];
+    logger.error(
+      `[${topic}] 주제 검색이 실패했습니다: ${aiError} `
+      + '— 큰 주제로 글감을 직접 만들어 계속 진행합니다.',
+    );
+  }
 
   const raw = (Array.isArray(reply.data?.picks) ? reply.data.picks : [])
     .map(normalizePick)
@@ -307,7 +342,7 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
   }
   if (!kept.length) {
     kept = buildFallbackTopics(topic, target, allSeen);
-    if (kept.length) relaxed = '큰 주제로 직접 만듦';
+    if (kept.length) relaxed = aiError ? '검색 실패 — 큰 주제로 직접 만듦' : '큰 주제로 직접 만듦';
   }
 
   if (relaxed) {
@@ -325,7 +360,8 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
 
   // 검색을 한 번도 안 돌렸다면 "검색했다고 말만 한" 결과다.
   // 최신 정보로 고른 주제가 아니니 그대로 믿으면 안 된다.
-  if (!reply.searches) {
+  // (호출 자체가 실패한 경우는 위에서 이미 이유를 적었으니 또 적지 않는다)
+  if (!reply.searches && !aiError) {
     logger.warn(
       `[${topic}] 웹 검색이 실제로 실행되지 않았습니다. `
       + '고른 주제가 최신 정보가 아니라 모델이 아는 내용일 수 있습니다. '
@@ -358,6 +394,7 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
     received: raw.length,
     dropped,
     relaxed,     // 조건을 풀어서 골랐으면 그 이유. 화면과 로그에 그대로 띄운다.
+    aiError,     // 검색 호출 자체가 실패했으면 그 이유 한 줄.
   };
 }
 
@@ -407,6 +444,51 @@ ${seedText}
 }
 
 /**
+ * 처음 시작하는 블로그에 쓸 씨앗 분야.
+ *
+ * 기록이 하나도 없고 AI 도 응답을 못 줄 때만 쓴다.
+ * 한국 독자가 꾸준히 찾고, 내용이 계속 바뀌어서 쓸 거리가 마르지 않는 분야들이다.
+ */
+const STARTER_BIG_TOPICS = [
+  '정부 지원금',
+  '국가기술자격증',
+  '건강보험 제도',
+  '전기차 보조금',
+  '아파트 청약',
+  '연말정산',
+  '대학 입시',
+  '청년 취업 지원 제도',
+  '국민연금',
+  '자동차 관련 제도',
+];
+
+/**
+ * AI 가 큰 주제를 못 줄 때 쓸 마지막 수단.
+ *
+ * "끊김 없이 영원히" 를 켜 뒀는데 claude 호출 한 번이 어긋났다고 멈추면
+ * 켜 둔 뜻이 없다. 그래서 **지금까지 쓰던 큰 주제를 다시 쓴다.**
+ * 같은 분야라도 discoverTopics 가 각도를 바꿔 가며 글감을 만들어 내므로
+ * 같은 글이 반복되지는 않는다.
+ *
+ * @param {number} want          몇 개가 필요한지
+ * @param {Set<string>} avoidKeys 지금 대기열에 이미 있는 분야 (그건 넣어도 중복이다)
+ * @param {string[]} seeds       지금까지 쓴 큰 주제 (최근 순)
+ */
+export function buildFallbackBigTopics(want, avoidKeys = new Set(), seeds = []) {
+  const out = [];
+  const used = new Set(avoidKeys);
+  // 오래 안 쓴 것부터 다시 돌린다. 방금 쓴 분야를 또 집으면 글이 겹친다.
+  for (const topic of [...seeds].reverse().concat(STARTER_BIG_TOPICS)) {
+    if (out.length >= Math.max(1, want)) break;
+    const key = topicKey(topic);
+    if (!topic || used.has(key)) continue;
+    used.add(key);
+    out.push({ topic, why: '이어서 쓸 분야를 받지 못해 지금까지 쓰던 분야로 이어 갑니다.' });
+  }
+  return out;
+}
+
+/**
  * 대기열이 비었을 때 이어서 쓸 **큰 주제**를 만든다.
  *
  * 사용자가 계속 주제를 넣어 주지 않아도 멈추지 않게 하기 위한 것이다.
@@ -420,9 +502,10 @@ ${seedText}
  */
 export async function discoverBigTopics({ want = 3, avoid = [], signal } = {}) {
   const seeds = recentBigTopics(20);
-  const blocked = new Set([...seeds, ...avoid].map((topic) => topicKey(topic)));
+  const avoidKeys = new Set(avoid.map((topic) => topicKey(topic)));
+  const blocked = new Set([...seeds.map((topic) => topicKey(topic)), ...avoidKeys]);
 
-  let reply;
+  let reply = { data: null };
   try {
     reply = await runClaudeJson(buildBigTopicPrompt(seeds, Math.max(want + 2, 5)), {
       systemPrompt: BIG_TOPIC_SYSTEM,
@@ -430,8 +513,9 @@ export async function discoverBigTopics({ want = 3, avoid = [], signal } = {}) {
       signal,
     });
   } catch (error) {
-    logger.warn(`이어서 쓸 큰 주제를 받지 못했습니다: ${error.message.split('\n')[0]}`);
-    return [];
+    // 중지와 사용량 한도는 "계속 쓰면 안 되는" 신호다. 그대로 올린다.
+    if (error?.rateLimited || /중지했습니다/.test(error?.message || '')) throw error;
+    logger.warn(`이어서 쓸 큰 주제를 받지 못했습니다: ${String(error.message).split('\n')[0]}`);
   }
 
   const topics = (Array.isArray(reply.data?.topics) ? reply.data.topics : [])
@@ -449,6 +533,21 @@ export async function discoverBigTopics({ want = 3, avoid = [], signal } = {}) {
     })
     .slice(0, want);
 
-  for (const item of topics) logger.info(`이어서 쓸 큰 주제: ${item.topic} — ${item.why}`);
-  return topics;
+  if (topics.length) {
+    for (const item of topics) logger.info(`이어서 쓸 큰 주제: ${item.topic} — ${item.why}`);
+    return topics;
+  }
+
+  /*
+   * 새 분야를 하나도 못 받았다. 여기서 빈손으로 돌아가면 "끊김 없이 계속 쓰기" 를
+   * 켜 뒀는데도 실행이 멈춘다. 켜 둔 뜻이 없어진다.
+   *
+   * 그래서 지금까지 쓰던 분야로 이어 간다. 새 분야가 아니어도 글은 계속 나온다.
+   * (같은 큰 주제 안에서 소재를 바꾸는 일은 discoverTopics 가 알아서 한다)
+   */
+  const fallback = buildFallbackBigTopics(want, avoidKeys, seeds);
+  for (const item of fallback) {
+    logger.warn(`이어서 쓸 새 분야를 못 받아 쓰던 분야로 이어 갑니다: ${item.topic}`);
+  }
+  return fallback;
 }

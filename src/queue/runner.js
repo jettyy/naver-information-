@@ -392,6 +392,9 @@ async function loop() {
   let consecutiveFailures = 0;
   // 발굴을 나갔는데 한 건도 못 건진 횟수. 주문이 바뀌면 다시 0부터 센다.
   let emptyDiscoveries = 0;
+  // 마지막으로 발굴이 실패한 이유. 주문을 접을 때 화면에 같이 띄운다.
+  // 이게 없으면 "새 주제를 찾지 못했습니다" 만 남아서 왜 그런지 알 수가 없다.
+  let lastDiscoverError = '';
   // 큰 주제를 이어 붙이러 나갔는데 빈손으로 온 횟수.
   let emptyRefills = 0;
 
@@ -406,6 +409,7 @@ async function loop() {
     if (request?.id !== state.currentRequestId) {
       state.currentRequestId = request?.id || null;
       emptyDiscoveries = 0;
+      lastDiscoverError = '';
       if (request && request.status !== REQUEST_STATUS.RUNNING) {
         updateRequest(request.id, {
           status: REQUEST_STATUS.RUNNING,
@@ -499,6 +503,7 @@ async function loop() {
           continue;
         }
         if (/중지했습니다/.test(error.message)) break;
+        lastDiscoverError = shorten(error.message, 120);
         logger.error(`주제 발굴에 실패했습니다: ${error.message}`);
       }
 
@@ -509,7 +514,8 @@ async function loop() {
           finishRequest(
             request.id,
             REQUEST_STATUS.FAILED,
-            `새 주제를 찾지 못했습니다. (${request.saved}/${request.targetCount}건 저장)`,
+            `새 주제를 찾지 못했습니다. (${request.saved}/${request.targetCount}건 저장)`
+            + (lastDiscoverError ? ` — ${lastDiscoverError}` : ''),
           );
           logger.warn(
             `[${request.bigTopic}] 두 번 연속으로 주제를 하나도 받지 못해 이 주문을 접습니다. `
@@ -645,10 +651,14 @@ export function start() {
   if (state.running) return { ok: false, message: '이미 실행 중입니다.' };
 
   // 주문도 없고 손으로 넣은 주제도 없으면 할 일이 없다.
-  if (!nextRequest() && !nextPending()) {
+  // 단, [대기열이 비면 큰 주제를 알아서 이어 붙이기] 를 켜 뒀다면 얘기가 다르다.
+  // 그건 "빈 대기열에서 시작해도 알아서 만들어 쓰라" 는 뜻이다.
+  // 여기서 막아 버리면 체크해 놔도 실행이 안 돼서, 켜 둔 뜻이 없어진다.
+  if (!nextRequest() && !nextPending() && !getSettings().discover.autoRefill) {
     return {
       ok: false,
-      message: '2번 칸에 큰 주제를 넣고 [확인]을 누르거나, 직접 주제를 추가한 뒤에 실행해 주세요.',
+      message: '2번 칸에 큰 주제를 넣고 [확인]을 누르거나, 직접 주제를 추가한 뒤에 실행해 주세요. '
+        + '(주제를 넣지 않고 돌리려면 3번 칸의 [대기열이 비면 큰 주제를 알아서 이어 붙이기]를 켜세요)',
     };
   }
 
