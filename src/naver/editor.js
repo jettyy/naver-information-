@@ -161,41 +161,63 @@ export function pasteThreshold(text) {
   return Math.max(8, Math.floor(text.length * 0.6));
 }
 
+/** 글 맨 끝으로 커서를 보내는 단축키. */
+const DOC_END = process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End';
+
+/** 지금 커서가 본문 편집 영역 안에 있는지. */
+async function caretInBody(scope) {
+  return scope
+    .evaluate(() => {
+      const root = document.querySelector('.se-main-container')
+        || document.querySelector('.se-content');
+      const active = document.activeElement;
+      if (!root || !active || active === document.body) return false;
+      // 제목 칸에 커서가 있으면 본문이 아니다.
+      if (active.closest?.('.se-documentTitle, .se-section-documentTitle')) return false;
+      return root.contains(active) || Boolean(active.closest?.('.se-main-container, .se-content'));
+    })
+    .catch(() => false);
+}
+
 /**
- * 본문 맨 끝에 커서를 놓고 편집 영역에 포커스를 준다.
+ * 본문 맨 끝에 커서를 놓는다.
  *
  * **이게 없으면 붙여넣기가 통째로 허공에 뿌려진다.** 사진을 넣거나 팝업이
  * 떴다 사라지면 포커스가 에디터 밖으로 나가는데, 그 상태에서는
  *   - 합성 paste 는 선택 영역이 없어 에디터가 무시하고
  *   - Ctrl+V 와 타이핑은 아예 다른 곳으로 가고
- * 셋 다 "조용히" 아무 일도 안 일어난다. 그러고도 저장은 되니까
- * 제목만 있고 본문은 텅 빈 글이 임시저장 목록에 쌓였다.
+ * 셋 다 "조용히" 아무 일도 안 일어난다.
  *
- * @returns {Promise<boolean>} 편집 영역을 잡았는지
+ * 커서를 잡는 방법은 **이 파일이 이미 쓰고 있는 것과 같은 선택자**(SELECTORS.body)
+ * 로 마지막 문단을 눌러 잡는다. 예전에는 `.se-main-container` 안의
+ * `[contenteditable="true"]` 를 DOM 으로 직접 찾았는데, 에디터 구조가
+ * 그 가정과 달라서 **한 건도 저장되지 않는 사고**가 났다. 확인된 선택자만 쓴다.
+ *
+ * 실패해도 던지지 않는다. 커서를 못 잡았다고 글을 버릴 이유는 없고,
+ * 진짜로 아무것도 안 들어갔는지는 저장 직전의 글자 수 검사가 잡아낸다.
+ *
+ * @returns {Promise<boolean>} 커서를 본문에 잡았는지 (실패해도 진행은 한다)
  */
-async function focusBodyEnd(scope) {
-  return scope
-    .evaluate(() => {
-      const root = document.querySelector('.se-main-container');
-      if (!root) return false;
+export async function focusBodyEnd(page, scope) {
+  if (!(await caretInBody(scope))) {
+    for (const selector of SELECTORS.body) {
+      try {
+        const all = scope.locator(selector);
+        const count = await all.count();
+        if (!count) continue;
+        // 마지막 문단을 눌러야 앞에 쓴 글 뒤로 이어진다.
+        await all.nth(count - 1).click({ timeout: 5000 });
+        await page.waitForTimeout(150);
+        break;
+      } catch {
+        // 다음 후보로 넘어간다.
+      }
+    }
+  }
 
-      // 제목은 별도 영역(se-documentTitle)이다. 본문 쪽 편집 영역만 고른다.
-      const editables = [...root.querySelectorAll('[contenteditable="true"]')]
-        .filter((node) => !node.closest('.se-documentTitle, .se-section-documentTitle'));
-      const last = editables[editables.length - 1];
-      if (!last) return false;
-
-      last.focus();
-      const range = document.createRange();
-      range.selectNodeContents(last);
-      range.collapse(false);          // 끝으로 접는다. 앞에 쓴 글을 덮지 않게.
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-
-      return root.contains(document.activeElement);
-    })
-    .catch(() => false);
+  // 커서를 글 맨 끝으로. 앞에 쓴 글을 덮어쓰지 않게.
+  await page.keyboard.press(DOC_END).catch(() => {});
+  return caretInBody(scope);
 }
 
 /**
@@ -206,16 +228,16 @@ async function focusBodyEnd(scope) {
  * 되돌린 뒤 다음 단계로 간다. 되돌리지 않고 다음 단계로 넘어가면 같은 글이
  * 두 번 들어간다.
  */
-async function pasteHtml(page, scope, html) {
+export async function pasteHtml(page, scope, html) {
   const text = htmlToPlainText(html);
   const before = await bodyTextLength(scope);
   const threshold = pasteThreshold(text);
   const grown = async () => (await bodyTextLength(scope)) - before;
 
-  if (!(await focusBodyEnd(scope))) {
-    throw new Error(
-      '본문 편집 영역을 잡지 못했습니다. 에디터가 준비되지 않았거나 팝업이 떠 있습니다.',
-    );
+  // 커서를 못 잡아도 일단 해 본다. 붙여넣기가 먹을 때가 있고, 정말로 아무것도
+  // 안 들어갔다면 저장 직전의 글자 수 검사에서 걸린다.
+  if (!(await focusBodyEnd(page, scope))) {
+    logger.warn('본문에 커서를 확실히 잡지 못했습니다. 그대로 붙여넣기를 시도합니다.');
   }
 
   /** 일부만 들어간 것을 되돌린다. 못 되돌리면 다음 단계를 건너뛰어 중복을 막는다. */
@@ -270,7 +292,7 @@ async function pasteHtml(page, scope, html) {
   }
 
   try {
-    await focusBodyEnd(scope);
+    await focusBodyEnd(page, scope);
     if (await tryClipboard()) return 'clipboard';
   } catch (error) {
     logger.warn(`클립보드 붙여넣기 실패: ${error.message.split('\n')[0]}`);
@@ -283,7 +305,7 @@ async function pasteHtml(page, scope, html) {
 
   // 마지막 수단: 서식 없이 평문으로라도 넣는다.
   logger.warn('서식 붙여넣기에 실패해 평문으로 입력합니다.');
-  await focusBodyEnd(scope);
+  await focusBodyEnd(page, scope);
   for (const line of text.split('\n')) {
     if (line.trim()) {
       try {
