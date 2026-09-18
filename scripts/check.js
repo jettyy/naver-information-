@@ -11,6 +11,7 @@
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { checkCompliance, countChars, buildRuleBlock } from '../src/content/quality.js';
@@ -32,6 +33,7 @@ import {
   buildFallbackBigTopics,
 } from '../src/content/discover.js';
 import { isBrokenOutput, writeConsole, consoleAlive, log } from '../src/lib/events.js';
+import { looksAuthExpired, AUTH_HINT, runClaude } from '../src/ai/claude.js';
 import { topicKey } from '../src/lib/history.js';
 import { planNextStep, discoverCapFor } from '../src/queue/runner.js';
 import {
@@ -162,6 +164,17 @@ let failures = 0;
 function test(name, fn) {
   try {
     fn();
+    console.log(`  통과  ${name}`);
+  } catch (error) {
+    failures += 1;
+    console.log(`  실패  ${name}\n        ${error.message}`);
+  }
+}
+
+/** test 와 같지만 기다려 준다. 안 기다리면 무조건 통과로 찍힌다. */
+async function testAsync(name, fn) {
+  try {
+    await fn();
     console.log(`  통과  ${name}`);
   } catch (error) {
     failures += 1;
@@ -1005,6 +1018,56 @@ test('발굴 설정은 대시보드로 그대로 내려간다', () => {
   assert.equal(saved.discover.bigTopic, '부동산 정책');
   assert.equal(publicSettings().discover.targetCount, 12);
   saveSettings({ discover: { bigTopic: '', targetCount: DEFAULT_SETTINGS.discover.targetCount } });
+});
+
+test('claude 로그인이 풀린 오류를 알아본다', () => {
+  // 실제로 겪은 메시지. 이걸 못 알아보면 남은 주제가 전부 같은 이유로 실패한다.
+  assert.ok(looksAuthExpired('Failed to authenticate: OAuth session expired and could not be refreshed'));
+  assert.ok(looksAuthExpired('Invalid API key · Please run /login'));
+  assert.ok(looksAuthExpired('authentication_error'));
+  assert.ok(looksAuthExpired('401 Unauthorized'));
+  // 다른 실패까지 로그인 문제로 보면 멀쩡한 대기열이 세워진다.
+  assert.ok(!looksAuthExpired('claude CLI 를 찾을 수 없습니다'));
+  assert.ok(!looksAuthExpired('Request timed out'));
+  assert.ok(!looksAuthExpired('rate limit exceeded'));
+  // 사람이 무엇을 해야 하는지가 안내에 들어 있어야 한다.
+  assert.ok(AUTH_HINT.includes('claude'), '무엇을 실행하라는 건지 안 적혀 있습니다');
+  assert.ok(AUTH_HINT.includes('이어서 실행'), '그다음에 뭘 누르라는 건지 안 적혀 있습니다');
+});
+
+await testAsync('claude 가 프롬프트를 읽기 전에 죽어도 프로그램이 안 죽는다', async () => {
+  /*
+   * 로그인이 풀린 claude 는 프롬프트를 다 읽기도 전에 끝나 버린다.
+   * 그때 나는 write EPIPE 를 받아주지 않으면 그대로 uncaughtException 이 되어
+   * **서버 전체가 죽는다.** 대시보드에는 "연결할 수 없음" 만 뜬다.
+   */
+  const win = process.platform === 'win32';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'naver-check-'));
+  const fake = path.join(dir, win ? 'fake.cmd' : 'fake.sh');
+  fs.writeFileSync(fake, win
+    ? '@echo off\r\necho Failed to authenticate: OAuth session expired 1>&2\r\nexit /b 1\r\n'
+    : '#!/bin/sh\necho "Failed to authenticate: OAuth session expired" >&2\nexit 1\n');
+  if (!win) fs.chmodSync(fake, 0o755);
+
+  const before = getSettings().claude.command;
+  saveSettings({ claude: { command: fake, timeoutMs: 20000 } });
+
+  let caught = null;
+  try {
+    // 프롬프트가 길어야 파이프에 한 번에 안 들어가서 EPIPE 가 제대로 재현된다.
+    await runClaude('가'.repeat(200000), { timeoutMs: 20000 });
+  } catch (error) {
+    caught = error;
+  } finally {
+    saveSettings({
+      claude: { command: before, timeoutMs: DEFAULT_SETTINGS.claude.timeoutMs },
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  assert.ok(caught, '실패해야 하는데 성공으로 끝났습니다');
+  // 죽지 않고, 진짜 원인(로그인 만료)까지 제대로 알아봐야 한다.
+  assert.equal(caught.authExpired, true, `로그인 만료로 못 알아봤습니다: ${caught.message}`);
 });
 
 test('countChars 는 공백을 빼고 센다', () => {

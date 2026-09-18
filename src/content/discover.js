@@ -297,7 +297,12 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
       },
     );
   } catch (error) {
-    if (error?.rateLimited || /중지했습니다/.test(error?.message || '')) throw error;
+    // 로그인 만료·사용량 한도·중지는 "계속 쓰면 안 되는" 신호다. 그대로 올린다.
+    // 여기서 글감을 만들어 봐야 글쓰기 단계에서 똑같이 전부 실패한다.
+    // (실제로 로그인이 풀린 채로 글감 5건을 만들었다가 5건 다 실패한 적이 있다)
+    if (error?.rateLimited || error?.authExpired || /중지했습니다/.test(error?.message || '')) {
+      throw error;
+    }
     aiError = String(error?.message || error).split('\n')[0];
     logger.error(
       `[${topic}] 주제 검색이 실패했습니다: ${aiError} `
@@ -513,8 +518,10 @@ export async function discoverBigTopics({ want = 3, avoid = [], signal } = {}) {
       signal,
     });
   } catch (error) {
-    // 중지와 사용량 한도는 "계속 쓰면 안 되는" 신호다. 그대로 올린다.
-    if (error?.rateLimited || /중지했습니다/.test(error?.message || '')) throw error;
+    // 로그인 만료·사용량 한도·중지는 "계속 쓰면 안 되는" 신호다. 그대로 올린다.
+    if (error?.rateLimited || error?.authExpired || /중지했습니다/.test(error?.message || '')) {
+      throw error;
+    }
     logger.warn(`이어서 쓸 큰 주제를 받지 못했습니다: ${String(error.message).split('\n')[0]}`);
   }
 

@@ -8,6 +8,7 @@ import {
 } from '../lib/requests.js';
 import { getSettings } from '../lib/settings.js';
 import { discoverTopics, discoverBigTopics } from '../content/discover.js';
+import { AUTH_HINT } from '../ai/claude.js';
 import { recordTopics } from '../lib/history.js';
 import { addRequest, listRequests } from '../lib/requests.js';
 import { generatePost, countChars } from '../content/generator.js';
@@ -331,7 +332,7 @@ async function refillOrders() {
     }
     return topics.length;
   } catch (error) {
-    if (error.rateLimited) throw error;
+    if (error.rateLimited || error.authExpired) throw error;
     logger.error(`큰 주제를 이어 붙이지 못했습니다: ${error.message}`);
     return 0;
   } finally {
@@ -437,7 +438,27 @@ async function loop() {
      * 사용자가 큰 주제를 계속 넣어 주지 않아도 멈추지 않게 하는 장치다.
      */
     if (step === 'refill-orders') {
-      const made = await refillOrders();
+      let made = 0;
+      try {
+        made = await refillOrders();
+      } catch (error) {
+        // 로그인 만료와 사용량 한도는 여기서 실행을 끝내면 안 된다.
+        // 끝내 버리면 [이어서 실행]을 눌러도 대기열이 비어 있어서 다시 못 돈다.
+        if (error.authExpired) {
+          state.paused = true;
+          logger.error(AUTH_HINT);
+          broadcast();
+          continue;
+        }
+        if (error.rateLimited) {
+          state.paused = true;
+          logger.error(`큰 주제를 찾는 중 사용량 한도에 걸려 일시정지했습니다. ${error.message}`);
+          broadcast();
+          continue;
+        }
+        if (/중지했습니다/.test(error.message)) break;
+        logger.error(`큰 주제를 이어 붙이지 못했습니다: ${error.message}`);
+      }
       if (!made) {
         emptyRefills += 1;
         // 두 번 연달아 빈손이면 더 돌려도 같다. 호출만 태우지 말고 멈춘다.
@@ -496,6 +517,14 @@ async function loop() {
       try {
         added = await refillQueue(request);
       } catch (error) {
+        // 로그인이 풀린 채로 계속 찾아봐야 전부 실패한다. 주문을 접지 말고 세워 둔다.
+        if (error.authExpired) {
+          state.paused = true;
+          updateRequest(request.id, { message: 'claude 로그인이 풀려 대기 중입니다.' });
+          logger.error(AUTH_HINT);
+          broadcast();
+          continue;
+        }
         if (error.rateLimited) {
           state.paused = true;
           logger.error(`주제를 찾는 중 사용량 한도에 걸려 일시정지했습니다. ${error.message}`);
@@ -543,6 +572,29 @@ async function loop() {
       }
     } catch (error) {
       const message = error.message || String(error);
+
+      /*
+       * claude 로그인이 풀렸다. 계속 돌리면 남은 주제가 **전부** 같은 이유로
+       * 실패해서 대기열이 통째로 타 버린다. 실제로 그렇게 3건이 실패하고
+       * 실행이 멈춘 적이 있다. 사람이 다시 로그인하기 전에는 무엇도 못 한다.
+       *
+       * 그래서 실패로 두지 않고 **대기로 되돌린 뒤 일시정지**한다.
+       * 다시 로그인하고 [이어서 실행]을 누르면 이 주제부터 그대로 이어진다.
+       */
+      if (error.authExpired) {
+        updateJob(job.id, {
+          status: STATUS.PENDING,
+          message: 'claude 로그인이 풀려 대기 중입니다.',
+          detail: message,
+          // 이 실패로 재시도 횟수를 까먹지 않게 되돌린다. 주제 탓이 아니다.
+          // (processJob 이 시작할 때 1 을 올려 뒀다. job 은 그 전의 값이다)
+          attempts: job.attempts,
+        });
+        state.paused = true;
+        logger.error(AUTH_HINT);
+        broadcast();
+        continue;
+      }
 
       // 사용량 한도는 계속 돌려도 전부 실패한다. 멈추고 사람이 판단하게 둔다.
       if (error.rateLimited) {

@@ -44,6 +44,25 @@ function looksRateLimited(message) {
   return /(rate[ _-]?limit|usage limit|too many requests|429|quota|한도|사용량|제한을 초과)/i.test(String(message));
 }
 
+/**
+ * claude CLI 로그인이 풀린 오류인지.
+ *
+ * 한도와 마찬가지로 **계속 돌려봐야 전부 같은 이유로 실패한다.**
+ * 다만 한도는 기다리면 풀리고 이건 사람이 다시 로그인해야 풀린다.
+ * 둘을 섞으면 "잠시 뒤 다시" 라는 엉뚱한 안내가 나가므로 따로 본다.
+ *
+ * 실제로 겪은 메시지:
+ *   Failed to authenticate: OAuth session expired and could not be refreshed
+ */
+export function looksAuthExpired(message) {
+  return /(failed to authenticate|oauth|session expired|not authenticated|unauthenticated|invalid api key|authentication[_ -]?error|please run \/login|run `?\/login|401|unauthorized)/i
+    .test(String(message));
+}
+
+/** 로그인이 풀렸을 때 사람이 무엇을 해야 하는지. 한 군데에만 적어 둔다. */
+export const AUTH_HINT = 'claude 로그인이 풀렸습니다. 검은 창(터미널)에서 `claude` 를 실행해 '
+  + '다시 로그인한 뒤, 대시보드에서 [이어서 실행]을 눌러주세요.';
+
 /** 실패했을 때 원문을 파일로 남긴다. 깨진 메시지만 보고는 원인을 못 찾는다. */
 function dumpFailure({ args, stdout, stderr, code }) {
   try {
@@ -235,7 +254,9 @@ export function runClaude(prompt, {
         const dump = dumpFailure({ args, stdout, stderr, code });
 
         let hint = '';
-        if (looksRateLimited(detail)) {
+        if (looksAuthExpired(detail)) {
+          hint = ` — ${AUTH_HINT}`;
+        } else if (looksRateLimited(detail)) {
           hint = ' — 사용량 한도에 걸린 것 같습니다. 잠시 뒤에 다시 시도하세요.';
         } else if (wanted && /model|모델/i.test(detail)) {
           hint = ` — '${wanted}' 모델을 쓸 수 없는 플랜일 수 있습니다. 설정에서 다른 모델을 골라보세요.`;
@@ -247,6 +268,7 @@ export function runClaude(prompt, {
           `claude CLI 종료 코드 ${code}: ${detail || '(출력 없음)'}${hint}`,
         );
         error.rateLimited = looksRateLimited(detail);
+        error.authExpired = looksAuthExpired(detail);
         error.dumpFile = dump;
         reject(error);
         return;
@@ -258,6 +280,7 @@ export function runClaude(prompt, {
           const message = String(envelope.result || envelope.subtype || '알 수 없는 오류');
           const error = new Error(`claude 오류: ${message}`);
           error.rateLimited = looksRateLimited(message);
+          error.authExpired = looksAuthExpired(message);
           reject(error);
           return;
         }
@@ -279,7 +302,22 @@ export function runClaude(prompt, {
       }
     });
 
-    child.stdin.end(fullPrompt, 'utf8');
+    /*
+     * 프롬프트를 넘기다 파이프가 끊기는 경우가 있다.
+     *
+     * claude 가 프롬프트를 다 읽기 전에 끝나 버리면(로그인이 풀려서 곧바로
+     * 죽는 경우가 대표적이다) 여기서 write EPIPE 가 난다. 받아주지 않으면
+     * 그게 그대로 uncaughtException 이 되어 **서버 전체가 죽는다.**
+     *
+     * 진짜 원인(종료 코드와 stderr)은 'close' 에서 이미 읽어 알려주므로,
+     * 여기서는 삼키고 그쪽 메시지가 나가게 둔다.
+     */
+    child.stdin.on('error', () => {});
+    try {
+      child.stdin.end(fullPrompt, 'utf8');
+    } catch {
+      // 위와 같은 이유. 종료 코드 쪽에서 제대로 된 메시지가 나간다.
+    }
   });
 }
 

@@ -244,7 +244,9 @@ export async function runResearch(topic, { shape, count, signal } = {}) {
       },
     );
   } catch (error) {
-    if (error.rateLimited || /중지했습니다/.test(error.message)) throw error;
+    // 로그인이 풀렸거나 한도에 걸린 것이면 검색 없이 써 봐야 글쓰기도 똑같이 실패한다.
+    // 여기서 삼키면 "검색 없이 글을 씁니다" 만 남고 진짜 원인이 묻힌다.
+    if (error.rateLimited || error.authExpired || /중지했습니다/.test(error.message)) throw error;
     logger.warn(`[${topic}] 자료 조사에 실패해 검색 없이 글을 씁니다: ${error.message}`);
     return null;
   }
