@@ -1,7 +1,7 @@
 import { runClaudeJson, WEB_TOOLS } from '../ai/claude.js';
 import { getSettings } from '../lib/settings.js';
 import { logger } from '../lib/events.js';
-import { recentTopics, seenKeys, topicKey } from '../lib/history.js';
+import { recentTopics, recentBigTopics, seenKeys, topicKey } from '../lib/history.js';
 import { isUsableUrl } from './research.js';
 
 /**
@@ -359,4 +359,96 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
     dropped,
     relaxed,     // 조건을 풀어서 골랐으면 그 이유. 화면과 로그에 그대로 띄운다.
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* 큰 주제 자동 이어가기                                                */
+/* ------------------------------------------------------------------ */
+
+const BIG_TOPIC_SYSTEM = [
+  '당신은 블로그 운영자입니다. 지금까지 다뤄 온 분야를 보고 다음에 쓸 분야를 정합니다.',
+  '개별 글 제목이 아니라, 글감을 여러 편 뽑아낼 수 있는 **넓은 분야**를 고릅니다.',
+  '요청받은 JSON 형식만 정확히 출력합니다.',
+].join(' ');
+
+export function buildBigTopicPrompt(seeds, want) {
+  const year = new Date().getFullYear();
+  const seedText = seeds.length
+    ? seeds.map((topic) => `- ${topic}`).join('\n')
+    : '- (아직 없습니다. 한국 독자가 꾸준히 찾는 생활·제도 분야에서 골라 주세요)';
+
+  return `지금까지 이 블로그가 다뤄 온 **큰 주제** 목록입니다.
+
+${seedText}
+
+이 목록과 **결이 이어지는 큰 주제 ${want}개**를 새로 골라 주세요.
+
+[큰 주제란]
+- 개별 글 제목이 아닙니다. 글감을 5~10편 뽑아낼 수 있는 **넓은 분야**입니다.
+- 좋은 예: "청년 정부 지원금", "전기차 보조금", "국가기술자격증", "아파트 청약"
+- 나쁜 예(너무 좁음): "2026년 청년월세지원 소득 기준"
+- 나쁜 예(너무 넓음): "정보", "생활", "돈"
+
+[고르는 기준]
+- 위 목록과 **읽는 사람이 겹치는** 분야를 고르세요. 블로그 색이 흐려지면 안 됩니다.
+  (예: 대학 입시를 써 왔으면 → 취업, 자격증, 학자금 같은 쪽)
+- 위 목록에 **이미 있는 것과 같은 분야는 빼세요.** 표현만 바꾼 것도 안 됩니다.
+- ${year}년 한국 독자가 실제로 검색할 만한 분야여야 합니다.
+- 제도·지원금·시험·요금처럼 **내용이 계속 바뀌는** 분야가 좋습니다. 쓸 거리가 꾸준히 생깁니다.
+- 의료·금융에서 효과나 수익을 단정하는 분야, 성인·도박, 정치 진영 다툼은 빼세요.
+
+[출력] JSON 객체 하나만. 설명도 코드 펜스도 붙이지 마세요.
+
+{
+  "topics": [
+    {"topic": "큰 주제", "why": "왜 이 블로그와 결이 맞는지 한 줄"}
+  ]
+}`;
+}
+
+/**
+ * 대기열이 비었을 때 이어서 쓸 **큰 주제**를 만든다.
+ *
+ * 사용자가 계속 주제를 넣어 주지 않아도 멈추지 않게 하기 위한 것이다.
+ * 지금까지 쓴 큰 주제를 씨앗으로 주고 결이 이어지는 분야를 더 받아 온다.
+ *
+ * 실패해도 던지지 않는다. 빈 배열이 오면 부르는 쪽이 판단한다.
+ *
+ * @param {object} options
+ * @param {number} options.want     몇 개를 받아올지
+ * @param {string[]} options.avoid  이번에 특별히 빼야 할 큰 주제 (지금 대기열에 있는 것 등)
+ */
+export async function discoverBigTopics({ want = 3, avoid = [], signal } = {}) {
+  const seeds = recentBigTopics(20);
+  const blocked = new Set([...seeds, ...avoid].map((topic) => topicKey(topic)));
+
+  let reply;
+  try {
+    reply = await runClaudeJson(buildBigTopicPrompt(seeds, Math.max(want + 2, 5)), {
+      systemPrompt: BIG_TOPIC_SYSTEM,
+      timeoutMs: getSettings().discover.timeoutMs,
+      signal,
+    });
+  } catch (error) {
+    logger.warn(`이어서 쓸 큰 주제를 받지 못했습니다: ${error.message.split('\n')[0]}`);
+    return [];
+  }
+
+  const topics = (Array.isArray(reply.data?.topics) ? reply.data.topics : [])
+    .map((item) => ({
+      topic: text(item?.topic, 60).replace(/^["'\s-]+|["'\s]+$/g, ''),
+      why: text(item?.why, 200),
+    }))
+    .filter((item) => item.topic.length >= 2)
+    // 이미 쓰고 있는 분야는 뺀다. 여기서 겹치면 같은 글만 계속 나온다.
+    .filter((item) => {
+      const key = topicKey(item.topic);
+      if (blocked.has(key)) return false;
+      blocked.add(key);
+      return true;
+    })
+    .slice(0, want);
+
+  for (const item of topics) logger.info(`이어서 쓸 큰 주제: ${item.topic} — ${item.why}`);
+  return topics;
 }

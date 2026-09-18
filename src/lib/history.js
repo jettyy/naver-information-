@@ -78,6 +78,26 @@ export function seenKeys() {
   return new Set(load().map((entry) => entry.key));
 }
 
+/**
+ * 지금까지 쓴 **큰 주제** 목록. 최근에 쓴 것부터.
+ *
+ * 대기열이 비었을 때 "이런 걸 써 왔으니 비슷한 걸 더 찾아줘" 라고
+ * 부탁하기 위한 씨앗이다. (src/content/discover.js 의 discoverBigTopics)
+ */
+export function recentBigTopics(limit = 20) {
+  const list = load();
+  const out = [];
+  const seen = new Set();
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const big = String(list[i].bigTopic || '').trim();
+    if (!big || seen.has(big)) continue;
+    seen.add(big);
+    out.push(big);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 export function historyStats(bigTopic) {
   const list = load();
   return {

@@ -28,7 +28,7 @@ import {
 import { renderTemplate } from '../src/content/templates/index.js';
 import { buildResearchBlock, isUsableUrl } from '../src/content/research.js';
 import {
-  buildDiscoverPrompt, normalizePick, screenPicks, buildFallbackTopics,
+  buildDiscoverPrompt, normalizePick, screenPicks, buildFallbackTopics, buildBigTopicPrompt,
 } from '../src/content/discover.js';
 import { topicKey } from '../src/lib/history.js';
 import { planNextStep, discoverCapFor } from '../src/queue/runner.js';
@@ -808,6 +808,22 @@ test('만든 글감이 이미 쓴 것이어도 빈손으로 돌아가지 않는�
   assert.ok(again.length >= 1, '하나도 못 만들었습니다. 이러면 주문이 중단됩니다.');
 });
 
+test('이어서 쓸 큰 주제 프롬프트에 지금까지 쓴 분야가 들어간다', () => {
+  const prompt = buildBigTopicPrompt(['전기차 보조금', '청년 지원금'], 3);
+  assert.ok(prompt.includes('전기차 보조금'), '씨앗 주제가 안 들어갔습니다');
+  assert.ok(prompt.includes('청년 지원금'), '씨앗 주제가 안 들어갔습니다');
+  assert.ok(prompt.includes('3개'), '요청 개수가 안 들어갔습니다');
+  // 개별 글 제목이 아니라 넓은 분야를 달라는 지시가 핵심이다.
+  assert.ok(prompt.includes('넓은 분야'), '무엇을 달라는 건지 안 적혀 있습니다');
+  assert.ok(prompt.includes('이미 있는 것과 같은 분야는 빼세요'), '중복 제외 지시가 없습니다');
+});
+
+test('씨앗이 하나도 없어도 프롬프트가 만들어진다', () => {
+  // 처음 켠 사람은 기록이 비어 있다. 거기서 깨지면 안 된다.
+  const prompt = buildBigTopicPrompt([], 3);
+  assert.ok(prompt.includes('아직 없습니다'), '빈 목록 안내가 없습니다');
+});
+
 test('만든 글감은 낚시성·길이 검사를 통과한다', () => {
   // 걸러내기를 다시 통과하지 못하면 만들어 봐야 소용이 없다.
   const picks = buildFallbackTopics('대기업 연봉', 3).map(normalizePick);
@@ -844,6 +860,18 @@ test('대기가 떨어지면 그 주문의 큰 주제로 새로 찾아온다', (
 test('주문이 없으면 손으로 넣은 주제만 쓰고 끝낸다', () => {
   assert.equal(plan(true, null), 'process');
   assert.equal(plan(false, null), 'stop-empty');
+});
+
+test('자동 이어가기를 켜면 대기열이 비어도 끝내지 않는다', () => {
+  // 사용자가 큰 주제를 계속 넣어 주지 않아도 멈추지 않게 하는 장치.
+  assert.equal(planNextStep({ hasPending: false, request: null, autoRefill: true }), 'refill-orders');
+  // 아직 쓸 주제가 남아 있으면 그것부터 쓴다. 굳이 새로 만들지 않는다.
+  assert.equal(planNextStep({ hasPending: true, request: null, autoRefill: true }), 'process');
+  // 진행 중인 주문이 있으면 그 주문을 먼저 끝낸다.
+  assert.equal(
+    planNextStep({ hasPending: false, request: order({ saved: 2 }), autoRefill: true }),
+    'discover',
+  );
 });
 
 test('계속 찾아오는데 저장이 안 되면 그 주문을 포기한다', () => {

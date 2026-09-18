@@ -312,6 +312,7 @@ function renderSettings() {
   $('s-recency').value = s.discover.recencyDays;
   $('s-min-score').value = s.discover.minScore;
   $('s-discover-searches').value = s.discover.maxSearches;
+  $('s-auto-refill').checked = Boolean(s.discover.autoRefill);
   renderOrders();
   renderDiscoverState();
 
@@ -605,10 +606,11 @@ async function saveDiscoverSettings() {
       recencyDays: Number($('s-recency').value) || 30,
       minScore: Number($('s-min-score').value) || 0,
       maxSearches: Number($('s-discover-searches').value) || 6,
+      autoRefill: $('s-auto-refill').checked,
     },
   });
 }
-for (const id of ['s-target-count', 's-batch-size', 's-recency', 's-min-score', 's-discover-searches']) {
+for (const id of ['s-target-count', 's-batch-size', 's-recency', 's-min-score', 's-discover-searches', 's-auto-refill']) {
   $(id).addEventListener('change', () => saveDiscoverSettings().catch((e) => toast(e.message)));
 }
 

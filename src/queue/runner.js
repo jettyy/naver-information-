@@ -7,8 +7,9 @@ import {
   REQUEST_STATUS, nextRequest, updateRequest, finishRequest, getRequest, requestStats,
 } from '../lib/requests.js';
 import { getSettings } from '../lib/settings.js';
-import { discoverTopics } from '../content/discover.js';
+import { discoverTopics, discoverBigTopics } from '../content/discover.js';
 import { recordTopics } from '../lib/history.js';
+import { addRequest, listRequests } from '../lib/requests.js';
 import { generatePost, countChars } from '../content/generator.js';
 import { summarize } from '../content/quality.js';
 import { renderThumbnail } from '../content/thumbnail.js';
@@ -293,6 +294,53 @@ async function refillQueue(request) {
 }
 
 /**
+ * 대기열이 비었을 때 이어서 쓸 **큰 주제**를 만들어 주문으로 넣는다.
+ *
+ * 사용자가 큰 주제를 계속 넣어 주지 않아도 멈추지 않게 하는 장치다.
+ * 지금까지 쓴 큰 주제를 씨앗으로 결이 이어지는 분야를 받아 온다.
+ *
+ * 받아 온 것이 하나도 없으면 0을 돌려준다. 여기서 억지로 만들어 내지는
+ * 않는다. 아무 분야나 골라 쓰면 블로그 색이 흐려지기 때문이다.
+ * (같은 큰 주제 안에서 소재가 떨어지는 것은 discoverTopics 가 알아서 푼다)
+ *
+ * @returns {Promise<number>} 새로 넣은 주문 수
+ */
+async function refillOrders() {
+  const settings = getSettings();
+  const want = Math.max(1, Number(settings.discover.refillCount) || 3);
+  const targetCount = Math.max(1, Number(settings.discover.targetCount) || 5);
+
+  state.discovering = true;
+  broadcast();
+  try {
+    logger.step(`대기열이 비었습니다. 이어서 쓸 큰 주제 ${want}건을 찾는 중...`);
+    const topics = await discoverBigTopics({
+      want,
+      // 아직 안 끝난 주문에 있는 분야는 빼고 받는다.
+      avoid: listRequests().map((request) => request.bigTopic),
+      signal: state.abort?.signal,
+    });
+
+    for (const item of topics) addRequest({ bigTopic: item.topic, targetCount });
+
+    if (topics.length) {
+      logger.info(
+        `큰 주제 ${topics.length}건을 대기열에 이어 붙였습니다 — `
+        + `${topics.map((item) => item.topic).join(', ')} (각 ${targetCount}건)`,
+      );
+    }
+    return topics.length;
+  } catch (error) {
+    if (error.rateLimited) throw error;
+    logger.error(`큰 주제를 이어 붙이지 못했습니다: ${error.message}`);
+    return 0;
+  } finally {
+    state.discovering = false;
+    broadcast();
+  }
+}
+
+/**
  * 한 주문이 주제를 몇 건까지 찾아올 수 있는지.
  *
  * 목표를 채울 때까지 도는 구조라, 글이 전부 실패하면(네이버 로그인이 풀렸다든지)
@@ -308,12 +356,17 @@ export const discoverCapFor = (request) => Math.max(10, (request?.targetCount ||
  * 아니면 끝없이 돌면서 검색 호출만 태운다. 둘 다 자는 동안 벌어지는 일이라
  * 판단만 따로 떼어 놓고 자체 점검에서 확인한다.
  *
- * @param {object|null} request  지금 처리 중인 주문 (없으면 null)
- * @returns {'process'|'discover'|'finish-request'|'give-up-request'|'stop-empty'}
+ * @param {object|null} request   지금 처리 중인 주문 (없으면 null)
+ * @param {boolean} autoRefill     대기열이 비면 큰 주제를 알아서 이어 붙일지
+ * @returns {'process'|'discover'|'finish-request'|'give-up-request'|'refill-orders'|'stop-empty'}
  */
-export function planNextStep({ hasPending, request }) {
-  // 주문이 없으면 손으로 넣은 주제만 쓰고 끝낸다. (예전 방식)
-  if (!request) return hasPending ? 'process' : 'stop-empty';
+export function planNextStep({ hasPending, request, autoRefill = false }) {
+  // 주문이 없을 때. 손으로 넣은 주제가 남아 있으면 그것부터 쓴다.
+  if (!request) {
+    if (hasPending) return 'process';
+    // 자동 이어가기를 켰으면 여기서 끝내지 않고 큰 주제를 새로 만들어 온다.
+    return autoRefill ? 'refill-orders' : 'stop-empty';
+  }
 
   // 목표를 채웠다. 넉넉히 받아 둔 주제가 남아 있어도 여기서 이 주문을 닫는다.
   // 그래야 다음 주문으로 넘어간다.
@@ -339,6 +392,8 @@ async function loop() {
   let consecutiveFailures = 0;
   // 발굴을 나갔는데 한 건도 못 건진 횟수. 주문이 바뀌면 다시 0부터 센다.
   let emptyDiscoveries = 0;
+  // 큰 주제를 이어 붙이러 나갔는데 빈손으로 온 횟수.
+  let emptyRefills = 0;
 
   while (state.running) {
     if (state.paused) {
@@ -364,11 +419,36 @@ async function loop() {
     }
 
     const job = nextPending();
-    const step = planNextStep({ hasPending: Boolean(job), request });
+    const autoRefill = Boolean(getSettings().discover.autoRefill);
+    const step = planNextStep({ hasPending: Boolean(job), request, autoRefill });
 
     if (step === 'stop-empty') {
       logger.info('대기 중인 주문과 주제가 모두 없습니다. 실행을 마칩니다.');
       break;
+    }
+
+    /*
+     * 대기열이 비었는데 자동 이어가기가 켜져 있다. 지금까지 쓴 큰 주제를
+     * 씨앗으로 결이 이어지는 분야를 새로 받아 와 주문으로 넣는다.
+     * 사용자가 큰 주제를 계속 넣어 주지 않아도 멈추지 않게 하는 장치다.
+     */
+    if (step === 'refill-orders') {
+      const made = await refillOrders();
+      if (!made) {
+        emptyRefills += 1;
+        // 두 번 연달아 빈손이면 더 돌려도 같다. 호출만 태우지 말고 멈춘다.
+        if (emptyRefills >= 2) {
+          logger.error(
+            '이어서 쓸 큰 주제를 두 번 연속으로 받지 못해 실행을 멈춥니다. '
+            + '설정에서 [선택한 모델로 연결 테스트]를 눌러 보세요.',
+          );
+          break;
+        }
+        await sleep(5000);
+      } else {
+        emptyRefills = 0;
+      }
+      continue;
     }
 
     // 목표를 채웠다. 넉넉히 받아 둔 주제가 남아 있으면 건너뜀으로 정리하고
@@ -530,8 +610,9 @@ async function loop() {
     const next = planNextStep({
       hasPending: Boolean(nextPending()),
       request: nextRequest(),
+      autoRefill: Boolean(getSettings().discover.autoRefill),
     });
-    if (next !== 'process' && next !== 'discover') continue;
+    if (next !== 'process' && next !== 'discover' && next !== 'refill-orders') continue;
 
     // 짧은 시간에 몰아서 올리면 네이버가 연속 자동화로 볼 수 있다. 사이를 띄운다.
     const { delayMinSec, delayMaxSec } = getSettings().run;
