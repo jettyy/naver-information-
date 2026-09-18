@@ -27,7 +27,9 @@ import {
 } from '../src/content/imagegen.js';
 import { renderTemplate } from '../src/content/templates/index.js';
 import { buildResearchBlock, isUsableUrl } from '../src/content/research.js';
-import { buildDiscoverPrompt, normalizePick, screenPicks } from '../src/content/discover.js';
+import {
+  buildDiscoverPrompt, normalizePick, screenPicks, buildFallbackTopics,
+} from '../src/content/discover.js';
 import { topicKey } from '../src/lib/history.js';
 import { planNextStep, discoverCapFor } from '../src/queue/runner.js';
 import {
@@ -782,6 +784,35 @@ test('채택한 주제는 관심도 점수가 높은 순으로 나온다', () =>
   ].map(normalizePick);
   const { kept } = screenPicks(picks, { minScore: 0 });
   assert.deepEqual(kept.map((pick) => pick.score), [91, 75, 62]);
+});
+
+test('이미 다 쓴 주제여도 큰 주제로 글감을 만들어 낸다', () => {
+  // 비슷한 큰 주제를 여러 개 걸어두면 기록이 쌓여 전부 "이미 쓴 주제" 에 걸린다.
+  // 그때 빈손으로 돌아가면 그 주문이 통째로 중단된다. 실제로 주문 20건이
+  // 전부 "새 주제를 찾지 못했습니다" 로 멈춘 적이 있다.
+  const picks = buildFallbackTopics('대학 순위', 3);
+  assert.equal(picks.length, 3, `${picks.length}건만 만들었습니다`);
+  for (const pick of picks) {
+    assert.ok(pick.topic.includes('대학 순위'), `큰 주제가 빠졌습니다: ${pick.topic}`);
+    assert.ok(pick.topic.length >= 8, `제목이 너무 짧습니다: ${pick.topic}`);
+  }
+  // 제목이 서로 달라야 같은 글이 여러 번 써지지 않는다.
+  assert.equal(new Set(picks.map((p) => p.topic)).size, picks.length, '제목이 겹칩니다');
+});
+
+test('만든 글감이 이미 쓴 것이어도 빈손으로 돌아가지 않는다', () => {
+  // 각도를 전부 써 버린 상황. 겹치더라도 하나는 내놓아야 진행이 멈추지 않는다.
+  const first = buildFallbackTopics('대학 순위', 20);
+  const seen = new Set(first.map((pick) => topicKey(pick.topic)));
+  const again = buildFallbackTopics('대학 순위', 5, seen);
+  assert.ok(again.length >= 1, '하나도 못 만들었습니다. 이러면 주문이 중단됩니다.');
+});
+
+test('만든 글감은 낚시성·길이 검사를 통과한다', () => {
+  // 걸러내기를 다시 통과하지 못하면 만들어 봐야 소용이 없다.
+  const picks = buildFallbackTopics('대기업 연봉', 3).map(normalizePick);
+  const { kept } = screenPicks(picks, { minScore: 0 });
+  assert.equal(kept.length, picks.length, '만든 글감이 걸러내기에서 떨어졌습니다');
 });
 
 test('주제 비교 열쇠는 공백과 기호를 무시한다', () => {

@@ -264,10 +264,12 @@ async function refillQueue(request) {
       signal: state.abort?.signal,
     });
 
+    // discoverTopics 는 조건을 풀어 가며 반드시 뭐라도 건져 온다. 그래도 0건이면
+    // 모델이 응답을 제대로 못 준 경우다. 다음 판에서 다시 시도한다.
     if (!result.picks.length) {
       logger.warn(
-        `[${request.bigTopic}] 새로 쓸 만한 주제를 찾지 못했습니다. `
-        + '큰 주제를 조금 넓히거나, 설정에서 관심도 점수 하한을 낮춰 보세요.',
+        `[${request.bigTopic}] 이번 발굴에서 아무 것도 받지 못했습니다 `
+        + `(모델이 준 후보 ${result.received}건). 잠시 뒤 다시 시도합니다.`,
       );
       return 0;
     }
@@ -278,7 +280,9 @@ async function refillQueue(request) {
     const added = addTopics(result.picks, request.id);
     updateRequest(request.id, {
       discovered: request.discovered + added.length,
-      message: `주제 ${added.length}건을 찾았습니다.`,
+      // 조건을 풀어서 고른 경우 그 사실을 화면에도 남긴다.
+      message: `주제 ${added.length}건을 찾았습니다.`
+        + (result.relaxed ? ` (${result.relaxed})` : ''),
     });
     logger.info(`[${request.bigTopic}] 주제 ${added.length}건을 작업 목록에 추가했습니다.`);
     return added.length;
@@ -428,8 +432,9 @@ async function loop() {
             `새 주제를 찾지 못했습니다. (${request.saved}/${request.targetCount}건 저장)`,
           );
           logger.warn(
-            `[${request.bigTopic}] 두 번 연속으로 새 주제를 찾지 못해 이 주문을 접습니다. `
-            + '큰 주제를 조금 넓히거나 관심도 점수 하한을 낮춰 보세요.',
+            `[${request.bigTopic}] 두 번 연속으로 주제를 하나도 받지 못해 이 주문을 접습니다. `
+            + '조건을 풀어도 빈손이면 AI 응답 자체가 안 오는 것이니, '
+            + '설정에서 [선택한 모델로 연결 테스트]와 2번 칸의 [미리 보기만]을 눌러 보세요.',
           );
           continue;
         }

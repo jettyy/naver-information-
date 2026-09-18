@@ -180,6 +180,59 @@ export function screenPicks(picks, { minScore = 0, seen = new Set() } = {}) {
   return { kept, dropped };
 }
 
+/**
+ * 검색으로 아무 것도 못 건졌을 때, 큰 주제 자체로 글감을 만든다.
+ *
+ * 마지막 수단이다. 모델이 후보를 하나도 안 주거나 전부 걸러졌을 때,
+ * 빈손으로 돌아가면 그 주문이 중단된다. 관련도가 좀 낮더라도 글이 나오는
+ * 편이 낫다는 판단으로, 큰 주제에 각도를 붙여 제목을 만든다.
+ *
+ * 각도를 여러 개 두는 이유는 같은 제목만 계속 만들어 내지 않기 위해서다.
+ * 이미 쓴 제목은 건너뛴다.
+ */
+export function buildFallbackTopics(bigTopic, want, seen = new Set()) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const angles = [
+    '총정리',
+    '한눈에 보기',
+    '올해 달라진 점 정리',
+    '자주 묻는 질문 정리',
+    '처음 찾아보는 분들을 위한 정리',
+    '알아두면 도움 되는 점 정리',
+  ];
+
+  const limit = Math.max(1, want);
+  const make = (title) => ({
+    topic: title,
+    why: '검색으로 새 소재를 찾지 못해 큰 주제로 직접 만든 글감입니다.',
+    score: 0,
+    searchTerms: [bigTopic],
+    freshness: '',
+    sources: [],
+  });
+
+  const out = [];
+  // 연도만 붙인 제목 -> 그것도 다 썼으면 월까지 붙여 다른 제목을 만든다.
+  for (const prefix of [`${year}년`, `${year}년 ${month}월`]) {
+    for (const angle of angles) {
+      if (out.length >= limit) break;
+      const title = `${bigTopic} ${angle}`.trim();
+      const full = `${prefix} ${title}`;
+      if (seen.has(topicKey(full))) continue;
+      seen.add(topicKey(full));
+      out.push(make(full));
+    }
+    if (out.length >= limit) break;
+  }
+
+  // 그래도 하나도 없으면 겹치는 것을 그대로 쓴다.
+  // 여기서 빈손으로 돌아가면 주문이 중단된다. 겹치는 글이 낫다.
+  if (!out.length) out.push(make(`${year}년 ${month}월 ${bigTopic} 총정리`));
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* 실행                                                                */
 /* ------------------------------------------------------------------ */
@@ -221,11 +274,48 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
     .map(normalizePick)
     .filter(Boolean);
 
-  // 이미 다룬 주제(기록)와 이번에 따로 제외하라고 받은 주제를 한 덩어리로 본다.
-  const seen = seenKeys();
-  for (const topic of exclude) seen.add(topicKey(topic));
+  /*
+   * 걸러내기 — 다 걸러졌다고 빈손으로 돌아오지 않는다.
+   *
+   * 예전에는 한 번만 거르고 끝냈다. 그런데 비슷한 큰 주제를 여러 개 걸어두면
+   * (대학 순위 / 대학 서열 / 학과 순위 …) 기록이 쌓일수록 "이미 쓴 주제" 에
+   * 전부 걸려서 0건이 되고, 두 번 연속 0건이면 그 주문이 통째로 중단됐다.
+   * 실제로 주문 20건이 전부 "새 주제를 찾지 못했습니다" 로 멈춘 적이 있다.
+   *
+   * 같은 소재를 다시 써도 되고, 관련도가 좀 낮아도 글이 나오는 편이 낫다.
+   * 그래서 조건을 한 단계씩 풀어 가며 반드시 뭐라도 건져 온다.
+   *   1) 원래 조건 (이미 쓴 주제 제외 + 관심도 점수 하한)
+   *   2) 이미 쓴 주제 허용 (대기열에 있는 것만 제외 — 그건 어차피 중복이라)
+   *   3) 관심도 점수 하한까지 해제
+   *   4) 그래도 없으면 큰 주제로 글감을 직접 만든다
+   */
+  const historyKeys = seenKeys();
+  const queueKeys = new Set(exclude.map((item) => topicKey(item)));
+  const allSeen = new Set([...historyKeys, ...queueKeys]);
+  const { minScore } = settings.discover;
 
-  const { kept, dropped } = screenPicks(raw, { minScore: settings.discover.minScore, seen });
+  let { kept, dropped } = screenPicks(raw, { minScore, seen: new Set(allSeen) });
+  let relaxed = '';
+
+  if (!kept.length && raw.length) {
+    ({ kept, dropped } = screenPicks(raw, { minScore, seen: new Set(queueKeys) }));
+    if (kept.length) relaxed = '이미 쓴 주제 허용';
+  }
+  if (!kept.length && raw.length) {
+    ({ kept, dropped } = screenPicks(raw, { minScore: 0, seen: new Set(queueKeys) }));
+    if (kept.length) relaxed = '이미 쓴 주제 + 낮은 관심도 허용';
+  }
+  if (!kept.length) {
+    kept = buildFallbackTopics(topic, target, allSeen);
+    if (kept.length) relaxed = '큰 주제로 직접 만듦';
+  }
+
+  if (relaxed) {
+    logger.warn(
+      `[${topic}] 조건에 맞는 새 소재가 없어 **${relaxed}** 로 ${kept.length}건을 골랐습니다. `
+      + '같은 소재를 다른 각도로 쓰게 됩니다.',
+    );
+  }
 
   const picks = kept.slice(0, target).map((pick) => ({
     ...pick,
@@ -267,5 +357,6 @@ export async function discoverTopics(bigTopic, { want, exclude = [], signal } = 
     model: reply.model || '',
     received: raw.length,
     dropped,
+    relaxed,     // 조건을 풀어서 골랐으면 그 이유. 화면과 로그에 그대로 띄운다.
   };
 }
