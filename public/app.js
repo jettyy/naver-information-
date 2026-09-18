@@ -731,6 +731,32 @@ $('btn-clear-orders').onclick = async () => {
   toast('끝난 주문을 정리했습니다.');
 };
 
+/**
+ * 대기열을 통째로 비운다. 하나씩 [취소] 를 누르지 않아도 되게.
+ *
+ * 되돌릴 수 없고 진행 중인 주문까지 멈추므로 몇 건이 지워지는지 보여주고 묻는다.
+ */
+$('btn-clear-all-orders').onclick = async () => {
+  const orders = state.requests || [];
+  if (!orders.length) return toast('대기열이 이미 비어 있습니다.');
+
+  const running = orders.filter((order) => order.status === 'running').length;
+  const ok = confirm(
+    `대기열의 주문 ${orders.length}건을 모두 지울까요?\n`
+    + (running ? `진행 중인 주문 ${running}건도 멈춥니다.\n` : '')
+    + '아직 쓰지 않은 주제는 건너뜀으로 정리됩니다. (이미 저장된 글은 그대로입니다)',
+  );
+  if (!ok) return;
+
+  const data = await api('/api/requests/clear', { method: 'POST', body: { onlyFinished: false } });
+  state.requests = data.requests || [];
+  renderOrders();
+  renderDiscoverState();
+  await refreshState();
+  toast(`주문 ${data.removed || 0}건을 지웠습니다.`
+    + (data.cleaned ? ` (대기 주제 ${data.cleaned}건 정리)` : ''));
+};
+
 function renderPicks() {
   const list = $('pick-list');
   const actions = $('pick-actions');

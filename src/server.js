@@ -180,8 +180,33 @@ app.delete('/api/requests/:id', wrap(async (req, res) => {
   res.json({ ok: true, requests: listRequests(), jobs: listJobs() });
 }));
 
+/**
+ * 주문 대기열 비우기.
+ *
+ * `onlyFinished` 가 false 면 아직 안 끝난 주문까지 전부 지운다. 이때
+ * **그 주문들이 찾아둔 대기 주제도 같이 걷어내야 한다.** 주문만 지우면
+ * 작업 목록에 남은 주제가 계속 써져서, 지웠는데도 글이 올라간다.
+ * (주문 하나를 지우는 DELETE 쪽과 같은 이유다)
+ */
 app.post('/api/requests/clear', wrap(async (req, res) => {
-  res.json({ ok: true, requests: clearRequests(req.body?.onlyFinished !== false) });
+  const onlyFinished = req.body?.onlyFinished !== false;
+
+  let cleaned = 0;
+  let removed = 0;
+  if (!onlyFinished) {
+    for (const request of listRequests()) {
+      removed += 1;
+      cleaned += cancelPendingJobs(request.id, '대기열을 비워서 쓰지 않았습니다.');
+    }
+  }
+
+  const requests = clearRequests(onlyFinished);
+  if (!onlyFinished) {
+    logger.info(
+      `대기열을 비웠습니다 — 주문 ${removed}건${cleaned ? `, 대기 주제 ${cleaned}건 정리` : ''}`,
+    );
+  }
+  res.json({ ok: true, requests, jobs: listJobs(), removed, cleaned });
 }));
 
 /* ---------- 주제 발굴 (큰 주제 → 최신 정보 → 글 주제) ---------- */
