@@ -21,7 +21,7 @@ import {
 } from '../src/content/naver.js';
 import { buildMarkdown } from '../src/content/markdown.js';
 import { DEFAULT_SETTINGS, saveSettings, getSettings, publicSettings } from '../src/lib/settings.js';
-import { detectShape } from '../src/content/ranking.js';
+import { detectShape, compactRanking } from '../src/content/ranking.js';
 import {
   buildImagePrompt, buildPosterPrompt, pickAspectRatio,
   looksLikeImageModel, rankImageModels, pickVisionModel, priceOf,
@@ -33,7 +33,7 @@ import {
   buildFallbackBigTopics,
 } from '../src/content/discover.js';
 import { isBrokenOutput, writeConsole, consoleAlive, log } from '../src/lib/events.js';
-import { looksAuthExpired, AUTH_HINT, runClaude } from '../src/ai/claude.js';
+import { looksAuthExpired, AUTH_HINT, runClaude, WRITE_ANYWAY_BLOCK } from '../src/ai/claude.js';
 import { topicKey } from '../src/lib/history.js';
 import { planNextStep, discoverCapFor } from '../src/queue/runner.js';
 import {
@@ -522,6 +522,52 @@ test('주제 문자열에서 글의 모양을 알아낸다', () => {
   assert.equal(detectShape('유튜브 구독자 TOP100 순위').shape, 'table');
   assert.equal(detectShape('유튜브 구독자 TOP100 순위').needsChunking, true);
   assert.equal(detectShape('전세 계약 전 확인할 서류').shape, 'general');
+});
+
+test('목표만큼 못 채워도 채운 만큼 1위부터 순위를 매긴다', () => {
+  // "TOP 50" 인데 31개밖에 못 받는 일은 흔하다. 그때 빈 번호를 남기면
+  // "1~20위, 그리고 35~45위" 같은 고장 난 표가 나온다.
+  const byRank = new Map();
+  for (const rank of [1, 2, 3, 17, 18, 40]) {
+    byRank.set(rank, [String(rank), `항목 ${rank}`, '특징']);
+  }
+
+  const { rows, missing } = compactRanking(byRank, 50);
+
+  assert.equal(rows.length, 6, '받은 행을 다 안 실었습니다');
+  // 번호가 1부터 빈틈없이 이어져야 한다. 이게 이 검사의 핵심이다.
+  assert.deepEqual(rows.map((row) => row[0]), ['1', '2', '3', '4', '5', '6']);
+  // 순서는 원래 번호 순서를 지켜야 한다. 내용이 섞이면 안 된다.
+  assert.deepEqual(
+    rows.map((row) => row[1]),
+    ['항목 1', '항목 2', '항목 3', '항목 17', '항목 18', '항목 40'],
+  );
+  // 몇 개가 모자랐는지는 기록으로 남아야 한다. 글에 그 사실을 밝혀야 하므로.
+  assert.equal(missing.length, 44);
+});
+
+test('목표를 다 채우면 번호가 그대로다', () => {
+  const byRank = new Map();
+  for (let rank = 1; rank <= 5; rank += 1) byRank.set(rank, [String(rank), `항목 ${rank}`]);
+  const { rows, missing } = compactRanking(byRank, 5);
+  assert.deepEqual(rows.map((row) => row[0]), ['1', '2', '3', '4', '5']);
+  assert.equal(missing.length, 0);
+});
+
+test('한 건도 못 받으면 빈 표로 돌아온다', () => {
+  // 여기서 터지면 글 전체가 실패한다. 품질 검사가 잡도록 빈 채로 넘긴다.
+  const { rows, missing } = compactRanking(new Map(), 50);
+  assert.equal(rows.length, 0);
+  assert.equal(missing.length, 50);
+});
+
+test('근거가 부족해도 쓰라는 지시가 프롬프트에 들어 있다', () => {
+  // 이 도구가 다루는 주제는 대부분 공식 통계가 없다. 거절하면 쓸 글이 없다.
+  assert.ok(WRITE_ANYWAY_BLOCK.includes('거절하지'), '거절 금지 지시가 없습니다');
+  assert.ok(WRITE_ANYWAY_BLOCK.includes('통념'), '통념으로 써도 된다는 말이 없습니다');
+  // 다만 "지어내라" 가 되면 안 된다. 근거 수준을 밝히라는 조건이 핵심이다.
+  assert.ok(WRITE_ANYWAY_BLOCK.includes('근거 수준'), '근거 수준을 밝히라는 조건이 없습니다');
+  assert.ok(WRITE_ANYWAY_BLOCK.includes('지어내'), '수치를 지어내지 말라는 선이 없습니다');
 });
 
 test('개수를 안 쓴 순위 주제는 목표 개수만큼 크게 뽑는다', () => {

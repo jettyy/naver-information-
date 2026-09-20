@@ -212,21 +212,31 @@ function structureGuide(shape, settings, count) {
  * 없는데 수치를 쓰라고 하면 지어낸다. 그래서 두 경우를 나눈다.
  */
 function honestyBlock(hasResearch) {
-  const lines = ['[사실관계]'];
+  const lines = ['[사실관계 — 근거가 부족해도 글은 반드시 완성합니다]'];
   if (hasResearch) {
     lines.push(
-      '- 구체적인 수치, 일정, 기준, 제도 내용은 **위 조사 자료에 있는 것만** 쓰세요.',
-      '- 조사 자료에 없는 수치는 지어내지 말고 "지역과 시기에 따라 다릅니다" 처럼 여지를 두세요.',
+      '- 구체적인 수치, 일정, 기준, 제도 내용은 **위 조사 자료에 있는 것을 우선** 쓰세요.',
       '- 조사 자료의 "확인하지 못한 내용" 은 단정하지 말고, 확인이 필요하다고 밝히세요.',
       '- 수치를 쓸 때는 기준 시점을 함께 밝히세요. (예: 2026년 기준)',
       '- 본문에 URL 이나 링크를 직접 적지 마세요. 출처 목록은 글 끝에 자동으로 붙습니다.',
     );
   } else {
     lines.push(
-      '- 실시간 검색을 하지 못했으므로, 공식 조사 수치나 연도별 통계를 지어내지 마세요.',
-      '- 모르는 제도나 금액은 "지역과 시기에 따라 다릅니다" 처럼 정직하게 여지를 두고 쓰세요.',
+      '- 실시간 검색을 하지 못했습니다. 그래도 **글은 반드시 완성합니다.**',
+      '- 과거에 알려진 자료와 통념, 일반적으로 통용되는 평가를 근거로 삼아 쓰세요.',
     );
   }
+  lines.push(
+    '',
+    '조사 자료에 없는 내용은 이렇게 다루세요. **빼거나 얼버무리지 말고**,',
+    '근거 수준을 밝히면서 내용은 채웁니다.',
+    '- "일반적으로 알려진 기준입니다", "해마다 달라질 수 있습니다",',
+    '  "지역과 시기에 따라 다릅니다" 처럼 근거 수준을 한 마디 덧붙이면 됩니다.',
+    '- 밝히기만 하면 통념과 합리적인 추정으로 써도 됩니다.',
+    '- 다만 공식 기관이 발표한 것처럼 **기관명과 정확한 수치를 지어내 단정하지는** 마세요.',
+    '  (X: "교육부 2026년 발표에 따르면 취업률 87.3%입니다")',
+    '  (O: "취업률이 높은 편으로 알려져 있으나, 학과와 연도에 따라 차이가 큽니다")',
+  );
   const basis = hasResearch ? '공개된 자료' : '일반적으로 알려진 정보';
   lines.push(
     '- 순위는 절대적인 우열이 아니라 "정리한 참고 순서" 로 다루세요.',
@@ -235,6 +245,21 @@ function honestyBlock(hasResearch) {
   );
   return lines.join('\n');
 }
+
+/**
+ * 프롬프트 맨 끝에 붙이는 못 박기.
+ *
+ * 이 도구가 다루는 주제는 대부분 공식 통계가 없다(대학 순위, 연봉 순위,
+ * 성과급 순위…). 그때마다 "근거가 없어 못 쓰겠다" 로 접으면 쓸 수 있는 글이
+ * 거의 남지 않는다. 마지막에 읽은 지시를 가장 잘 따르므로 여기에 둔다.
+ */
+const NEVER_REFUSE_BLOCK = `[반드시 지킬 것 — 거절 금지]
+근거 자료가 부족하다는 이유로 글쓰기를 거절하지 마세요.
+"자료가 없어 쓸 수 없습니다", "정확한 정보를 확인할 수 없습니다" 같은 답은
+이 요청에 대한 올바른 답이 아닙니다.
+
+자료가 부족하면 위 [사실관계] 에 적은 대로 **근거 수준을 밝히고** 쓰면 됩니다.
+어떤 경우에도 JSON 을 완성해서 출력하세요.`;
 
 const FORMAT_BLOCK = [
   '[서식]',
@@ -282,7 +307,9 @@ ${jsonShape({
     withTableRows,
   })}
 
-필요 없는 키는 빼도 되지만 title, intro, sections, outro, table 은 반드시 채우세요.${buildGuidelineReminder(settings.post.extraGuideline)}`;
+필요 없는 키는 빼도 되지만 title, intro, sections, outro, table 은 반드시 채우세요.
+
+${NEVER_REFUSE_BLOCK}${buildGuidelineReminder(settings.post.extraGuideline)}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -591,7 +618,7 @@ export async function generatePost(topic, options = {}) {
       ? post.table.headers
       : ['순위', '항목', '핵심 특징'];
 
-    const { rows, model, missing } = await generateTableRows({
+    const { rows, model, missing, filled } = await generateTableRows({
       topic,
       headers,
       count,
@@ -599,20 +626,35 @@ export async function generatePost(topic, options = {}) {
       onProgress: options.onProgress,
     });
 
+    const baseNote = post.table?.note
+      || '이 표는 공식 순위가 아니라 일반적으로 알려진 정보를 정리한 참고 자료이며, '
+        + '최신 정보는 직접 확인하시기 바랍니다.';
+
+    /*
+     * 목표만큼 못 채웠어도 **채운 만큼은 1위부터 순위를 매겨 그대로 낸다.**
+     * (50개를 노렸는데 31개면 1~31위짜리 표다. 비워 두지 않는다)
+     * 다만 목표보다 적다는 사실은 표 아래에 밝힌다. 숨기면 글이 거짓말이 된다.
+     */
+    const short = filled < count;
     post.table = {
       heading: post.table?.heading || `${topic} 전체 정리`,
       headers,
       rows,
-      note: post.table?.note
-        || '이 표는 공식 순위가 아니라 일반적으로 알려진 정보를 정리한 참고 자료이며, '
-          + '최신 정보는 직접 확인하시기 바랍니다.',
+      note: short
+        ? `${baseNote} ${count}개를 목표로 했으나 확인 가능한 범위에서 `
+          + `${filled}개를 정리해 1위부터 ${filled}위까지 실었습니다.`
+        : baseNote,
     };
     post.model = post.model || model || '';
     post.tableExpected = count;
     post.tableMissing = missing;
+    post.tableFilled = filled;
 
-    if (missing.length) {
-      logger.warn(`표에서 ${missing.length}개 행을 끝내 채우지 못했습니다: ${missing.slice(0, 20).join(', ')}`);
+    if (short) {
+      logger.warn(
+        `표를 ${count}개 목표로 잡았으나 ${filled}개만 채웠습니다. `
+        + `빈 번호를 남기지 않고 1~${filled}위로 다시 매겨 그대로 씁니다.`,
+      );
     } else {
       logger.info(`표 ${rows.length}개 행을 빠짐없이 채웠습니다.`);
     }

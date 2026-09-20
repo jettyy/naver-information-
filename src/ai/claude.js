@@ -345,6 +345,41 @@ export function extractJson(text) {
 }
 
 /**
+ * 근거가 부족하다고 거절했을 때 조건을 바꿔 다시 묻는 블록.
+ *
+ * 핵심은 "지어내라" 가 아니라 **"무엇을 근거로 썼는지 밝히고 쓰라"** 는 것이다.
+ * 공식 통계가 없는 주제(대학 순위, 연봉 순위 등)가 이 도구의 주된 소재라
+ * 근거가 없다고 매번 접으면 쓸 수 있는 글이 거의 남지 않는다.
+ */
+export const WRITE_ANYWAY_BLOCK = `============================================================
+[다시 요청합니다 — 거절하지 말고 반드시 써 주세요]
+
+이 글은 **공식 발표 자료가 아니라 참고용 정리 글**입니다.
+공식 통계나 확정된 근거가 없어도 괜찮습니다. 아래 조건으로 반드시 작성하세요.
+
+- 과거에 알려진 자료, 통념, 일반적으로 통용되는 평가를 근거로 삼아도 됩니다.
+- 확실하지 않은 부분은 **"일반적으로 알려진 기준입니다", "해마다 달라질 수 있습니다"**
+  처럼 근거 수준을 밝히고 쓰세요. 밝히기만 하면 추정으로 써도 됩니다.
+- 순위는 절대적인 우열이 아니라 **정리한 참고 순서**로 다루세요.
+- 공식 기관이 발표한 것처럼 **꾸며 쓰지는** 마세요. 기관명과 정확한 수치를
+  지어내서 단정하는 것만 하지 않으면 됩니다.
+- 개인 신상, 특정 업체 비방, 의료·금융의 단정적 약속은 빼고 쓰세요.
+
+"자료가 없어 쓸 수 없습니다", "정확한 정보를 확인할 수 없습니다" 같은 답변은
+하지 마세요. 그 대신 위와 같이 근거 수준을 밝히고 글을 완성하세요.
+
+[출력] 설명 없이 JSON 객체 하나만. '{' 로 시작해 '}' 로 끝나야 합니다.`;
+
+/** 두 번 물어도 거절했을 때 올릴 오류. */
+function asRefusal(text) {
+  const reason = String(text).trim().replace(/\s+/g, ' ').slice(0, 300);
+  const refusal = new Error(`AI가 이 주제로 글쓰기를 거절했습니다: ${reason}`);
+  refusal.refusal = true;
+  refusal.reason = String(text).trim();
+  return refusal;
+}
+
+/**
  * JSON 응답을 요구하는 호출. 한 번 실패하면 형식을 다시 일러주고 재시도한다.
  * @returns {Promise<{data: any, model: string, costUsd: number}>}
  */
@@ -367,25 +402,48 @@ export async function runClaudeJson(prompt, options = {}) {
       if (dump) logger.warn(`AI 원문을 ${dump} 에 남겼습니다.`);
     }
 
-    // JSON 대신 긴 산문이 왔다면 형식 문제가 아니라 "이 주제로는 못 쓰겠다" 는 거절이다.
-    // 형식을 다시 일러줘도 소용없으니 호출을 한 번 더 쓰지 않고 이유를 그대로 올린다.
-    if (lastText.trim().length > 120 && !lastText.includes('{')) {
-      const reason = lastText.trim().replace(/\s+/g, ' ').slice(0, 300);
-      const refusal = new Error(`AI가 이 주제로 글쓰기를 거절했습니다: ${reason}`);
-      refusal.refusal = true;
-      refusal.reason = lastText.trim();
-      throw refusal;
-    }
     // CLI 자체가 실패한 경우는 형식을 다시 일러줘도 소용없다. 그대로 올린다.
     if (/종료 코드|찾을 수 없습니다|중지했습니다|오지 않았습니다|claude 오류/.test(error.message)) {
       throw error;
     }
-    logger.warn(`AI 응답 파싱 실패, 형식을 다시 지정해 재시도합니다. (${error.message})`);
-    const retryPrompt =
-      `${prompt}\n\n` +
-      `[중요] 설명이나 인사말 없이 JSON 객체 하나만 출력하세요. ` +
-      `코드 펜스(\`\`\`)도 쓰지 말고 '{' 로 시작해서 '}' 로 끝나야 합니다.`;
-    const reply = await runClaude(retryPrompt, options);
+
+    /*
+     * JSON 대신 긴 산문이 왔다면 형식 문제가 아니라
+     * "근거 자료가 없어서 이 주제로는 못 쓰겠다" 는 거절이다.
+     *
+     * 예전에는 여기서 바로 포기하고 그 주제를 건너뛰었다. 그런데 이 도구가
+     * 다루는 주제는 대부분 공식 통계가 없는 것들이다(대학 순위, 연봉 순위…).
+     * 그때마다 건너뛰면 쓸 수 있는 글이 거의 없다.
+     *
+     * 그래서 한 번 더 부른다. "지어내라" 가 아니라 **"근거 수준을 밝히고
+     * 일반적으로 알려진 정보로 쓰라"** 고 조건을 바꿔서 다시 묻는다.
+     * 그래도 거절하면 그때 포기한다.
+     */
+    const refused = lastText.trim().length > 120 && !lastText.includes('{');
+    if (refused) {
+      logger.warn('AI가 근거 부족으로 거절했습니다. 조건을 바꿔 한 번 더 요청합니다.');
+    } else {
+      logger.warn(`AI 응답 파싱 실패, 형식을 다시 지정해 재시도합니다. (${error.message})`);
+    }
+
+    const retryPrompt = refused
+      ? `${prompt}\n\n${WRITE_ANYWAY_BLOCK}`
+      : `${prompt}\n\n`
+        + `[중요] 설명이나 인사말 없이 JSON 객체 하나만 출력하세요. `
+        + `코드 펜스(\`\`\`)도 쓰지 말고 '{' 로 시작해서 '}' 로 끝나야 합니다.`;
+
+    let reply;
+    try {
+      reply = await runClaude(retryPrompt, options);
+    } catch (retryError) {
+      if (refused) throw asRefusal(lastText);
+      throw retryError;
+    }
+
+    // 다시 물어도 산문으로 거절했다면 그때는 접는다.
+    if (reply.text.trim().length > 120 && !reply.text.includes('{')) {
+      throw asRefusal(reply.text);
+    }
     return {
       data: extractJson(reply.text),
       model: reply.model,

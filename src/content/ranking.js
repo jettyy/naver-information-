@@ -161,11 +161,45 @@ function buildChunkPrompt({ topic, headers, start, end, existingNames, count }) 
 - 각 행은 정확히 ${headers.length}칸, 빈 칸 없이.
 - 각 칸 24자 이내. 특수문자와 이모지는 쓰지 마세요.
 - 앞에 나온 항목을 다시 쓰지 마세요. 전부 새로운 항목이어야 합니다.
-- 공식 조사 결과가 아니라 널리 알려진 정보를 모은 참고용 표입니다. 실제 조사 수치는 지어내지 말고 일반적인 특징으로 채우세요.
+- 공식 조사 결과가 아니라 널리 알려진 정보를 모은 참고용 표입니다. 기관이 발표한 것 같은 정확한 수치는 지어내지 말고, 일반적으로 알려진 특징으로 채우세요.
+- **근거 자료가 없다는 이유로 비워 두지 마세요.** 과거에 알려진 자료와 통념으로 채우면 됩니다.
+- "자료가 없습니다", "더 이상 없습니다", "확인할 수 없습니다" 라고 답하지 마세요. 범위를 넓혀서라도 채우세요.
 ${broaden ? `${broaden}\n` : ''}${existingNames.length ? `- 이미 나온 항목 ${existingNames.length}개 (전부 제외): ${existingNames.slice(-90).join(', ')}` : ''}
 
 JSON 만 출력:
 {"rows": [${sampleRow(start)}, ${sampleRow(start + 1)}]}`;
+}
+
+/**
+ * 받아온 행을 **빈 번호 없는 순위표**로 만든다.
+ *
+ * 목표가 50개인데 31개밖에 못 받는 일은 흔하다. 예전에는 모델이 매긴 번호를
+ * 그대로 썼기 때문에 "1~20위, 그리고 35~45위" 처럼 중간이 뚝 끊긴 표가 나왔다.
+ * 읽는 사람에게는 그냥 고장 난 표다.
+ *
+ * 그래서 **받은 만큼 1위부터 순서대로 다시 번호를 매긴다.** 50개를 노렸는데
+ * 31개가 나왔으면 1~31위짜리 표가 된다. 순서는 모델이 매긴 번호 순서를
+ * 그대로 지키고, 번호만 다시 붙인다.
+ *
+ * @param {Map<number, string[]>} byRank 모델이 매긴 번호 → 행
+ * @param {number} count 목표 행 수
+ * @returns {{rows: string[][], missing: number[]}} missing 은 못 받은 번호 (기록용)
+ */
+export function compactRanking(byRank, count) {
+  const missing = [];
+  for (let rank = 1; rank <= count; rank += 1) {
+    if (!byRank.has(rank)) missing.push(rank);
+  }
+
+  const rows = [...byRank.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, row], index) => {
+      const renumbered = [...row];
+      renumbered[0] = String(index + 1);
+      return renumbered;
+    });
+
+  return { rows, missing };
 }
 
 /**
@@ -269,13 +303,7 @@ export async function generateTableRows({
     }
   }
 
-  const rows = [];
-  const stillMissing = [];
-  for (let rank = 1; rank <= count; rank += 1) {
-    const row = byRank.get(rank);
-    if (row) rows.push(row);
-    else stillMissing.push(rank);
-  }
+  const { rows, missing: missingRanks } = compactRanking(byRank, count);
 
   // 열을 통째로 비워서 돌려주는 경우가 있어 채움 상태를 짚어둔다.
   const emptyCells = rows.reduce(
@@ -286,5 +314,14 @@ export async function generateTableRows({
     logger.warn(`표에 빈 칸이 ${emptyCells}개 있습니다. 열 구성이 복잡하면 줄이는 편이 낫습니다.`);
   }
 
-  return { rows, model, missing: stillMissing, emptyCells };
+  return {
+    rows,
+    model,
+    // 끝내 못 받은 번호들. 몇 개가 모자랐는지 기록용으로만 쓴다.
+    // 표 자체는 위에서 1위부터 빈틈없이 다시 번호를 매겨 두었다.
+    missing: missingRanks,
+    requested: count,
+    filled: rows.length,
+    emptyCells,
+  };
 }

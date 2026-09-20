@@ -615,7 +615,8 @@ async function loop() {
           detail: String(error.reason || message),
         });
         logger.warn(
-          `[${job.topic}] AI가 이 주제를 거절해 건너뜁니다. ${shorten(error.reason || message, 200)}`,
+          `[${job.topic}] 조건을 바꿔 한 번 더 요청했는데도 AI가 거절해 건너뜁니다. `
+          + `${shorten(error.reason || message, 200)}`,
           { jobId: job.id },
         );
         countForRequest(job, 'failed');
