@@ -144,6 +144,22 @@ async function bodyTextLength(scope) {
 }
 
 /**
+ * 본문에 들어간 **그림 개수**.
+ *
+ * 글자 수만 재면 그림이 지워진 것을 전혀 못 잡는다. 그림에는 글자가 없어서
+ * 통째로 사라져도 글자 수는 그대로이기 때문이다. 실제로 썸네일이 들어갔다가
+ * 뒤 단계에서 지워진 채로 저장되는 일이 있었다.
+ */
+export async function bodyImageCount(scope) {
+  return scope
+    .evaluate(() => {
+      const root = document.querySelector('.se-main-container') || document.body;
+      return root.querySelectorAll('.se-component.se-image, .se-image-resource').length;
+    })
+    .catch(() => 0);
+}
+
+/**
  * 붙여넣기가 실제로 얼마나 들어갔는지 셀 때 쓰는 최소 증가량.
  *
  * 예전에는 `Math.min(20, text.length / 2)` 를 썼다. 40자가 넘는 글이면
@@ -163,6 +179,8 @@ export function pasteThreshold(text) {
 
 /** 글 맨 끝으로 커서를 보내는 단축키. */
 const DOC_END = process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End';
+/** 글 맨 앞으로 커서를 보내는 단축키. */
+const DOC_HOME = process.platform === 'darwin' ? 'Meta+ArrowUp' : 'Control+Home';
 
 /** 지금 커서가 본문 편집 영역 안에 있는지. */
 async function caretInBody(scope) {
@@ -343,6 +361,54 @@ async function insertImage(page, scope, imagePath) {
 }
 
 /**
+ * 썸네일을 **글 맨 위에** 넣는다. 본문을 다 쓰고 맨 마지막에 부른다.
+ *
+ * 예전에는 도입부 바로 뒤에 넣었다. 그런데 그 뒤로도 할 일이 많았다.
+ * 본문 조각을 열 번 넘게 붙여넣고, 표를 넣고, 마지막에 Ctrl+A 로 전체를
+ * 선택해 왼쪽 정렬까지 건다. 그 사이에 썸네일이 지워지는 일이 있었다.
+ *
+ *   - 그림 바로 뒤에 커서가 놓이면 다음 붙여넣기가 **그림을 덮어쓴다**
+ *   - 정렬은 Ctrl+A 로 그림까지 선택한다. 거기서 키 하나만 어긋나도 지워진다
+ *
+ * 게다가 저장 직전 검사는 **글자 수만** 재기 때문에 그림이 사라진 것을
+ * 전혀 못 잡았다. 그래서 본문이 멀쩡한 채로 썸네일만 없는 글이 저장됐다.
+ *
+ * 순서를 뒤집으면 이 두 가지가 한꺼번에 없어진다. 맨 마지막에 넣으면
+ * **그 뒤에 그림을 건드릴 동작이 아예 없다.** 넣는 자리는 글 맨 위다.
+ * 네이버는 글에서 **처음 나오는 그림**을 대표 이미지로 쓰므로 맨 위가 제일 낫다.
+ *
+ * @returns {Promise<boolean>} 실제로 들어갔는지
+ */
+export async function insertThumbnailAtTop(page, scope, imagePath, jobId) {
+  const before = await bodyImageCount(scope);
+
+  // 커서를 글 맨 앞으로. 여기서 넣어야 대표 이미지가 된다.
+  for (const selector of SELECTORS.body) {
+    try {
+      const all = scope.locator(selector);
+      if (!(await all.count())) continue;
+      await all.first().click({ timeout: 5000 });
+      break;
+    } catch {
+      // 다음 후보로 넘어간다.
+    }
+  }
+  await page.keyboard.press(DOC_HOME).catch(() => {});
+  await page.waitForTimeout(200);
+
+  await insertImage(page, scope, imagePath);
+  await page.waitForTimeout(600);
+
+  const after = await bodyImageCount(scope);
+  if (after > before) {
+    logger.info('썸네일을 글 맨 위에 넣었습니다. (대표 이미지가 됩니다)', { jobId });
+    return true;
+  }
+  logger.warn('썸네일이 본문에 들어가지 않았습니다. 글은 그대로 저장합니다.', { jobId });
+  return false;
+}
+
+/**
  * 표를 확실하게 넣는다. 앞 단계가 실패하면 다음 단계로 내려간다.
  *
  *   1단계  표 전체를 한 번에 붙여넣기        — 성공하면 글자를 선택할 수 있는 진짜 표
@@ -519,12 +585,8 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
     const introMode = await pasteHtml(page, scope, introHtml);
     logger.info(`도입부 입력 완료 (${introMode})`, { jobId });
 
-    let thumbnailInserted = false;
-    if (thumbnailPath && settings.thumbnail.insert) {
-      await insertImage(page, scope, thumbnailPath);
-      thumbnailInserted = true;
-      logger.info('썸네일 삽입 완료 (도입부 직후, 대표 이미지가 됩니다)', { jobId });
-    }
+    // 썸네일은 **맨 마지막**에 넣는다. 여기서 넣으면 뒤따르는 붙여넣기와
+    // 전체 선택(정렬)에 휩쓸려 지워진다. (insertThumbnailAtTop 설명 참고)
 
     // 본문은 조각으로 나눠 붙인다. 조각 앞에 빈 문단을 두는 게 핵심이다.
     // 그게 없으면 조각의 첫 문단이 커서가 있던 문단 뒤에 그대로 이어붙어
@@ -587,6 +649,35 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
     if (afterAlign < beforeAlign * 0.9) {
       throw new Error(
         `정렬 과정에서 본문이 줄었습니다 (${beforeAlign}자 → ${afterAlign}자). `
+        + '저장하지 않고 재시도합니다.',
+      );
+    }
+
+    /*
+     * 마지막 순서 — 썸네일.
+     *
+     * 이 뒤로는 저장 버튼밖에 없다. 그림을 건드릴 동작이 하나도 남아 있지 않으니
+     * 지워질 일이 없다. (예전에는 도입부 뒤에 넣었다가 본문 붙여넣기와
+     * 전체 선택 정렬에 휩쓸려 사라졌다)
+     */
+    let thumbnailInserted = false;
+    if (thumbnailPath && settings.thumbnail.insert) {
+      try {
+        thumbnailInserted = await insertThumbnailAtTop(page, scope, thumbnailPath, jobId);
+      } catch (error) {
+        // 썸네일은 글의 부속물이다. 여기서 실패했다고 다 쓴 글을 버리지 않는다.
+        logger.warn(
+          `썸네일을 넣지 못해 글만 저장합니다: ${error.message.split('\n')[0]}`,
+          { jobId },
+        );
+      }
+    }
+
+    // 썸네일을 넣다가 본문이 상했는지 마지막으로 확인한다.
+    const beforeSave = await bodyTextLength(scope);
+    if (beforeSave < afterAlign * 0.9) {
+      throw new Error(
+        `썸네일을 넣는 중에 본문이 줄었습니다 (${afterAlign}자 → ${beforeSave}자). `
         + '저장하지 않고 재시도합니다.',
       );
     }

@@ -212,17 +212,22 @@ async function processJob(job) {
   // 저장 완료 표시(토스트)를 못 잡았어도 저장은 됐을 수 있다.
   // 확인하지 못했다는 사실을 감추지 않고 그대로 알린다.
   const saveNote = result.confirmed ? '임시저장 완료' : '임시저장 (저장 표시 확인 못 함)';
+  // 썸네일을 만들어 놓고도 본문에 못 넣는 일이 있었다. 넣었는지를 그대로 알린다.
+  const thumbNote = thumb.filePath && getSettings().thumbnail.insert && !result.thumbnailInserted
+    ? ' · 썸네일 없이 저장됨'
+    : '';
   updateJob(job.id, {
     status: STATUS.DONE,
-    message: compliance?.ok
+    message: (compliance?.ok
       ? `${saveNote} (품질 검사 통과)`
-      : `${saveNote} (${summarize(compliance)})`,
+      : `${saveNote} (${summarize(compliance)})`) + thumbNote,
+    thumbnailInserted: result.thumbnailInserted !== false,
     archiveDir: path.basename(dir),
     editUrl: result.draftListUrl || '',
     confirmed: result.confirmed,
   });
   logger.info(
-    `[${job.topic}] ${saveNote}. 네이버 글쓰기 화면의 [저장] 목록에서 확인하세요 `
+    `[${job.topic}] ${saveNote}${thumbNote}. 네이버 글쓰기 화면의 [저장] 목록에서 확인하세요 `
     + `→ ${result.draftListUrl}`,
     { jobId: job.id },
   );
