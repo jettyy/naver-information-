@@ -6,7 +6,7 @@ import {
 } from '../lib/paths.js';
 import { getSettings } from '../lib/settings.js';
 import { logger, push } from '../lib/events.js';
-import { chatGptUrl, SELECTORS, isTemporaryUrl } from './selectors.js';
+import { chatGptUrl, SELECTORS, isTemporaryUrl, isRateLimitDialog } from './selectors.js';
 
 /**
  * ChatGPT 세션을 다루는 곳.
@@ -132,6 +132,45 @@ async function restoreCookies(ctx) {
   }
 }
 
+/**
+ * 화면을 가로막는 알림창을 닫는다.
+ *
+ * "요청이 너무 많습니다 — 몇 분 후 다시 시도해 주세요" 같은 창이 떠서
+ * 입력창을 덮는 일이 있다. 그냥 두면 아무 것도 못 하고 기다리다 끝난다.
+ * 찾으면 [알겠습니다] 를 눌러 닫는다.
+ *
+ * @returns {Promise<{closed: boolean, rateLimited: boolean, text: string}>}
+ */
+export async function dismissDialog(page) {
+  const none = { closed: false, rateLimited: false, text: '' };
+
+  for (const selector of SELECTORS.dialog) {
+    const dialog = page.locator(selector).first();
+    if (!(await dialog.isVisible({ timeout: 500 }).catch(() => false))) continue;
+
+    const text = String(await dialog.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+    const rateLimited = isRateLimitDialog(text);
+
+    // 버튼은 **알림창 안에서만** 찾는다. 본문에 있는 같은 글자를 누르면 안 된다.
+    for (const buttonSelector of SELECTORS.dialogConfirm) {
+      const button = dialog.locator(buttonSelector).first();
+      if (!(await button.isVisible({ timeout: 300 }).catch(() => false))) continue;
+      await button.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(600);
+      logger.warn(`ChatGPT 알림창을 닫았습니다: ${text.slice(0, 80)}`);
+      return { closed: true, rateLimited, text };
+    }
+
+    // 버튼을 못 찾았으면 Esc 로라도 닫아 본다.
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(400);
+    const stillThere = await dialog.isVisible({ timeout: 500 }).catch(() => false);
+    return { closed: !stillThere, rateLimited, text };
+  }
+
+  return none;
+}
+
 /** 화면에 로그인 벽이 떠 있는지. 쿠키만으로는 만료를 못 잡을 때가 있다. */
 export async function looksLoggedOut(page) {
   for (const selector of SELECTORS.loginWall) {
@@ -151,6 +190,9 @@ export async function looksLoggedOut(page) {
 export async function openNormalChat(page, { timeoutMs = 60000 } = {}) {
   await page.goto(chatGptUrl(), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
   await page.waitForTimeout(1500);
+
+  // 들어오자마자 알림창이 떠 있을 수 있다. 먼저 치운다.
+  await dismissDialog(page).catch(() => {});
 
   // 1) 주소에 임시 채팅 표시가 남아 있으면 그것부터 떼고 다시 연다.
   if (isTemporaryUrl(page.url())) {

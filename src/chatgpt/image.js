@@ -3,7 +3,7 @@ import path from 'node:path';
 import { getSettings } from '../lib/settings.js';
 import { logger } from '../lib/events.js';
 import { SHOT_DIR, ensureDirs } from '../lib/paths.js';
-import { getChatGptContext, openNormalChat } from './browser.js';
+import { getChatGptContext, openNormalChat, dismissDialog } from './browser.js';
 import { SELECTORS, looksLikeGeneratedImage } from './selectors.js';
 
 /**
@@ -41,6 +41,21 @@ export function buildChatPrompt(imagePrompt, aspectRatio) {
     + '설명이나 질문은 하지 말고 그림만 만들어 주세요. '
     + `--- ${imagePrompt}`,
   );
+}
+
+/**
+ * 기다린다. 다만 그 사이에도 알림창이 뜨면 치운다.
+ *
+ * 그냥 waitForTimeout 으로 몇 분을 통째로 자면, 그 사이에 뜬 창이 계속 쌓여
+ * 깨어났을 때도 화면이 막혀 있다.
+ */
+async function waitQuietly(page, totalMs, signal) {
+  const deadline = Date.now() + totalMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new Error('사용자가 중지했습니다.');
+    await page.waitForTimeout(Math.min(5000, Math.max(500, deadline - Date.now())));
+    await dismissDialog(page).catch(() => {});
+  }
 }
 
 /** 화면을 찍어 둔다. 자동화가 깨졌을 때 이게 유일한 단서다. */
@@ -305,6 +320,10 @@ export async function generateViaChatGpt(imagePrompt, {
 } = {}) {
   const { image } = getSettings();
   const waitMs = Math.max(30000, Number(image.chatgpt?.waitMs) || 300000);
+  // "요청이 너무 많습니다" 창이 떴을 때 기다릴 시간. 창에 적힌 대로 몇 분 잡는다.
+  const rateWaitMs = Math.max(10000, Number(image.chatgpt?.rateLimitWaitMs) || 120000);
+  // 같은 이유로 다시 보내는 횟수. 끝없이 되풀이하지 않는다.
+  let sendsLeft = Math.max(0, Number(image.chatgpt?.rateLimitRetries) ?? 2);
 
   const ctx = await getChatGptContext();
   const page = await ctx.newPage();
@@ -317,6 +336,23 @@ export async function generateViaChatGpt(imagePrompt, {
     // 보내기 전에 화면에 있던 그림들을 적어 둔다. 이 뒤에 새로 생긴 것이
     // 방금 만든 그림이다. 첫 화면의 장식 그림을 집어 오지 않게 한다.
     const before = new Set((await collectImages(page).catch(() => [])).map((img) => img.src));
+
+    /*
+     * 보내기 직전에 한 번 더 알림창을 치운다.
+     *
+     * "요청이 너무 많습니다 — 몇 분 후 다시 시도해 주세요" 창이 입력창을 덮으면
+     * 글자를 넣어도 전송이 안 된다. 그냥 닫고 바로 보내면 같은 창이 또 뜨므로,
+     * 창에 적힌 대로 **기다렸다가** 보낸다.
+     */
+    const blocked = await dismissDialog(page).catch(() => ({ rateLimited: false }));
+    if (blocked.rateLimited) {
+      logger.warn(
+        `ChatGPT 가 요청이 너무 많다고 합니다. ${Math.round(rateWaitMs / 1000)}초 기다렸다 보냅니다.`,
+        { jobId },
+      );
+      await waitQuietly(page, rateWaitMs, signal);
+      await dismissDialog(page).catch(() => {});
+    }
 
     await typePrompt(page, prompt);
 
@@ -332,6 +368,29 @@ export async function generateViaChatGpt(imagePrompt, {
       if (signal?.aborted) throw new Error('사용자가 중지했습니다.');
       url = await findImageUrl(page, { ignore: before }).catch(() => '');
       if (url) break;
+
+      /*
+       * 기다리는 도중에도 알림창이 뜰 수 있다. 그때는 요청이 **아예 안 들어간**
+       * 것이라, 닫기만 하고 계속 기다리면 5분을 그냥 버린다.
+       * 닫고, 기다렸다가, 프롬프트를 **다시 보낸다.**
+       */
+      const popup = await dismissDialog(page).catch(() => ({ rateLimited: false, closed: false }));
+      if (popup.rateLimited && sendsLeft > 0) {
+        sendsLeft -= 1;
+        logger.warn(
+          `요청이 너무 많다는 알림이 떠서 닫았습니다. `
+          + `${Math.round(rateWaitMs / 1000)}초 뒤 다시 보냅니다. (남은 재시도 ${sendsLeft}회)`,
+          { jobId },
+        );
+        await waitQuietly(page, rateWaitMs, signal);
+        await dismissDialog(page).catch(() => {});
+        await typePrompt(page, prompt).catch((error) => {
+          logger.warn(`다시 보내지 못했습니다: ${error.message.split('\n')[0]}`, { jobId });
+        });
+        waited = 0;
+        continue;
+      }
+
       await page.waitForTimeout(2500);
       waited += 2500;
       // 오래 걸릴 때 화면만 보고 있으면 멈춘 건지 그리는 중인지 알 수 없다.

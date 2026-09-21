@@ -22,6 +22,8 @@ import {
   typePrompt, findImageUrl, downloadImage, flattenPrompt, buildChatPrompt,
   collectImages, describeImages,
 } from '../src/chatgpt/image.js';
+import { dismissDialog } from '../src/chatgpt/browser.js';
+import { isRateLimitDialog } from '../src/chatgpt/selectors.js';
 
 /* ------------------------------------------------------------------ */
 /* 가짜 PNG                                                            */
@@ -107,9 +109,19 @@ function fakePage(imagePath) {
   <div id="prompt-textarea" contenteditable="true"></div>
   <button data-testid="send-button" type="button" onclick="send()">보내기</button>
 </form>
+<!-- 진짜 화면의 "요청이 너무 많습니다" 알림창. 뜨면 입력창을 덮는다. -->
+<div id="limit" role="dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4)">
+  <div style="background:#fff;margin:20vh auto;padding:24px;width:420px">
+    <h2>요청이 너무 많습니다</h2>
+    <p>요청을 너무 빠르게 보내고 있습니다. 데이터를 보호하기 위해 대화에 대한
+       액세스가 일시적으로 제한되었습니다. 몇 분 후 다시 시도해 주세요.</p>
+    <button type="button" onclick="document.getElementById('limit').style.display='none'">알겠습니다</button>
+  </div>
+</div>
 <script>
   window.__sends = 0;
   window.__sent = [];
+  window.__showLimit = () => { document.getElementById('limit').style.display = 'block'; };
   function send() {
     const box = document.getElementById('prompt-textarea');
     const text = box.innerText.trim();
@@ -191,6 +203,16 @@ await test('여러 줄 프롬프트를 한 줄로 만든다', () => {
   assert.equal(flattenPrompt(null), '');
 });
 
+await test('"요청이 너무 많습니다" 를 알아본다', () => {
+  // 이건 그냥 닫고 바로 다시 보내면 안 된다. 기다렸다 보내야 한다.
+  assert.ok(isRateLimitDialog('요청이 너무 많습니다 요청을 너무 빠르게 보내고 있습니다'));
+  assert.ok(isRateLimitDialog('몇 분 후 다시 시도해 주세요'));
+  assert.ok(isRateLimitDialog('Too many requests'));
+  // 다른 알림창까지 한도로 보면 멀쩡한 흐름이 2분씩 늦어진다.
+  assert.ok(!isRateLimitDialog('새 기능을 확인해 보세요'));
+  assert.ok(!isRateLimitDialog(''));
+});
+
 await test('비율과 "그림만 그려라" 지시가 들어간다', () => {
   const prompt = buildChatPrompt('a flat illustration of a desk', '16:9');
   assert.ok(prompt.includes('16:9'), '비율이 안 들어갔습니다');
@@ -224,6 +246,36 @@ try {
     assert.equal(sends, 1, `${sends}번 전송됐습니다. 한 번이어야 합니다.`);
     const sent = await page.evaluate(() => window.__sent[0]);
     assert.equal(sent, longPrompt, '보낸 글이 잘렸습니다');
+  });
+
+  await test('"요청이 너무 많습니다" 창을 눌러 닫는다', async () => {
+    await page.evaluate(() => window.__showLimit());
+    await page.waitForTimeout(300);
+
+    const result = await dismissDialog(page);
+    assert.equal(result.closed, true, '창을 못 닫았습니다');
+    assert.equal(result.rateLimited, true, '요청 한도 알림인 줄 몰랐습니다');
+    assert.ok(result.text.includes('요청이 너무 많습니다'), `엉뚱한 글을 읽었습니다: ${result.text}`);
+    // 정말 닫혔는지 화면으로 확인한다.
+    assert.equal(await page.isHidden('#limit'), true, '창이 아직 떠 있습니다');
+  });
+
+  await test('알림창이 없으면 아무 것도 누르지 않는다', async () => {
+    // 창이 없는데 엉뚱한 버튼을 누르면(예: 보내기) 요청이 한 번 더 나간다.
+    const sendsBefore = await page.evaluate(() => window.__sends);
+    const result = await dismissDialog(page);
+    assert.equal(result.closed, false);
+    assert.equal(result.rateLimited, false);
+    assert.equal(await page.evaluate(() => window.__sends), sendsBefore, '뭔가를 눌렀습니다');
+  });
+
+  await test('알림창을 닫은 뒤 다시 보낼 수 있다', async () => {
+    // 한도 창이 뜨면 요청이 아예 안 들어간 것이라, 닫고 **다시 보내야** 한다.
+    await page.evaluate(() => window.__showLimit());
+    await dismissDialog(page);
+    const sendsBefore = await page.evaluate(() => window.__sends);
+    await typePrompt(page, '다시 보내는 요청입니다');
+    assert.equal(await page.evaluate(() => window.__sends), sendsBefore + 1, '다시 못 보냈습니다');
   });
 
   await test('아바타와 아이콘을 그림으로 착각하지 않는다', async () => {

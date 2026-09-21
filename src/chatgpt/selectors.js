@@ -40,6 +40,31 @@ export const SELECTORS = {
     'button[aria-label*="Stop"]',
   ],
 
+  /*
+   * 화면을 가로막는 알림창.
+   *
+   * "요청이 너무 많습니다 ... 몇 분 후 다시 시도해 주세요" 처럼 버튼 하나짜리
+   * 알림이 떠서 입력창을 덮는 일이 있다. 그냥 두면 아무 것도 못 하고
+   * 5분을 기다리다 끝난다. 찾으면 눌러서 닫는다.
+   */
+  dialog: [
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '[data-testid*="modal"]',
+  ],
+
+  // 알림창 안의 닫기 버튼. 창 안에서만 찾는다 (본문의 같은 글자를 누르지 않게).
+  dialogConfirm: [
+    'button:has-text("알겠습니다")',
+    'button:has-text("확인")',
+    'button:has-text("닫기")',
+    'button:has-text("Got it")',
+    'button:has-text("Okay")',
+    'button:has-text("OK")',
+    'button:has-text("Dismiss")',
+    'button',
+  ],
+
   // 로그인 화면임을 알려주는 것들
   loginWall: [
     'button[data-testid="login-button"]',
@@ -71,6 +96,17 @@ export const SELECTORS = {
 /** 주소만 보고도 임시 채팅인지 알 수 있다. 가장 믿을 만한 신호다. */
 export function isTemporaryUrl(url) {
   return /[?&]temporary-chat=true/i.test(String(url || ''));
+}
+
+/**
+ * 알림창 내용이 "너무 빨리 보냈다" 는 뜻인지.
+ *
+ * 이건 그냥 닫고 바로 다시 보내면 안 된다. 창에 적힌 대로 **몇 분 기다렸다가**
+ * 다시 보내야 한다. 닫자마자 또 보내면 같은 창이 또 뜬다.
+ */
+export function isRateLimitDialog(text) {
+  return /요청이 너무 많|너무 빠르게|잠시 후 다시|몇 분 후 다시|too many requests|rate limit|slow down|try again in/i
+    .test(String(text || ''));
 }
 
 /**
