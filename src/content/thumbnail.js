@@ -12,11 +12,61 @@ import { maybeGenerateImage } from './imagegen.js';
  * AI 가 설계한 문구/색상을 HTML 템플릿에 얹고 스크린샷으로 PNG를 만든다.
  * 이미지 생성 API를 쓰지 않으므로 추가 비용이 없다.
  */
+/**
+ * 네이버 사진 첨부가 받아 주는 형식.
+ *
+ * **여기가 중요하다.** 네이버 스마트에디터의 사진 업로드는 webp 를 받지 않는다.
+ * 그런데 ChatGPT 는 만든 그림을 보통 **webp 로 내려준다.** 그대로 넘기면
+ * 파일 선택 창은 받아들이는 척하고 아무 일도 일어나지 않아서,
+ * "이미지 업로드가 완료되지 않았습니다" 로 끝나고 썸네일이 빠진다.
+ *
+ * HTML 썸네일(png)은 늘 되는데 ChatGPT 것만 안 들어가던 이유가 이것이다.
+ */
+const NAVER_SAFE = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp']);
+
+/**
+ * 네이버가 안 받는 형식이면 PNG 로 바꾼다.
+ *
+ * 따로 라이브러리를 붙이지 않는다. 이미 띄워 둔 브라우저에 그림을 얹고
+ * 캔버스로 다시 그려 PNG 로 뽑는다. webp·avif 모두 크로미움이 읽을 수 있다.
+ */
+export async function toNaverSafeDataUri(dataUri, jobId) {
+  const type = (/^data:image\/([a-z0-9+.-]+);base64,/i.exec(dataUri)?.[1] || '').toLowerCase();
+  if (NAVER_SAFE.has(type === 'jpeg' ? 'jpg' : type)) return dataUri;
+
+  logger.info(`썸네일이 ${type || '알 수 없는'} 형식이라 PNG 로 바꿉니다. (네이버가 안 받는 형식)`, { jobId });
+
+  const browser = await getRenderBrowser();
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    const png = await page.evaluate(async (src) => {
+      const image = new Image();
+      image.decoding = 'sync';
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error('그림을 읽지 못했습니다'));
+        image.src = src;
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      canvas.getContext('2d').drawImage(image, 0, 0);
+      return canvas.toDataURL('image/png');
+    }, dataUri);
+    if (!/^data:image\/png;base64,/i.test(png)) throw new Error('PNG 로 바꾸지 못했습니다.');
+    return png;
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
+
 /** data:image/png;base64,... 를 파일로 떨군다. */
 function saveDataUri(dataUri, jobId, title) {
-  const match = /^data:image\/([a-z]+);base64,(.+)$/i.exec(dataUri);
+  const match = /^data:image\/([a-z0-9+.-]+);base64,(.+)$/i.exec(dataUri);
   if (!match) throw new Error('이미지 데이터를 읽지 못했습니다.');
-  const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+  const type = match[1].toLowerCase();
+  const ext = type === 'jpeg' ? 'jpg' : type;
   const fileName = `${Date.now()}-${jobId || slugify(title, 24)}.${ext}`;
   const filePath = path.join(THUMB_DIR, fileName);
   fs.writeFileSync(filePath, Buffer.from(match[2], 'base64'));
@@ -37,8 +87,10 @@ export async function renderThumbnail(post, { jobId = '', signal } = {}) {
   });
 
   if (generated?.mode === 'full') {
-    // 완성본이라 브라우저를 띄울 이유가 없다. 받은 그림을 그대로 저장한다.
-    const { filePath, fileName } = saveDataUri(generated.dataUri, jobId, post.title);
+    // 완성본이라 다시 그릴 이유가 없다. 다만 네이버가 안 받는 형식(webp 등)이면
+    // PNG 로 바꿔 둔다. 안 그러면 업로드가 조용히 실패해 썸네일이 빠진다.
+    const safe = await toNaverSafeDataUri(generated.dataUri, jobId);
+    const { filePath, fileName } = saveDataUri(safe, jobId, post.title);
     const size = fs.statSync(filePath).size;
     logger.info(`썸네일 저장 완료 (API 완성본, ${Math.round(size / 1024)}KB)`, { jobId });
     return { filePath, fileName, style: 'api', generated: true, mode: 'full' };

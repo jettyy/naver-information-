@@ -351,7 +351,16 @@ async function insertImage(page, scope, imagePath) {
   await scope
     .waitForSelector('.se-component.se-image, .se-image-resource', { timeout: 60000 })
     .catch(() => {
-      throw new Error('이미지 업로드가 완료되지 않았습니다.');
+      /*
+       * 네이버가 안 받는 형식을 넘기면 파일 선택 창은 받아들이는 척하고
+       * 아무 일도 일어나지 않는다. 그게 여기서 시간 초과로 나타난다.
+       * (ChatGPT 가 webp 로 내려준 그림이 딱 이랬다)
+       * 무엇을 넘겼는지 같이 적어야 다음에 원인을 찾을 수 있다.
+       */
+      throw new Error(
+        `이미지 업로드가 완료되지 않았습니다. (${path.basename(imagePath)}) `
+        + '네이버가 받지 않는 파일 형식일 수 있습니다. jpg/png/gif/bmp 만 됩니다.',
+      );
     });
   await page.waitForTimeout(1200);
 

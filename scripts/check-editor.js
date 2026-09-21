@@ -19,6 +19,8 @@ import path from 'node:path';
 import {
   focusBodyEnd, pasteHtml, pasteThreshold, bodyImageCount, insertThumbnailAtTop,
 } from '../src/naver/editor.js';
+import { toNaverSafeDataUri } from '../src/content/thumbnail.js';
+import { closeRenderBrowser } from '../src/lib/playwright.js';
 
 /**
  * 붙여넣기를 받아 문단으로 쌓는 최소 에디터.
@@ -258,7 +260,66 @@ function fakeEditorWithImage() {
   await context.close();
 }
 
-console.log('\n[4] 붙여넣기 성공 문턱');
+/* ------------------------------------------------------------------ */
+/* [4] 네이버가 받는 형식인가                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 실제로 있었던 사고: ChatGPT 는 만든 그림을 **webp** 로 내려준다. 그런데
+ * 네이버 사진 첨부는 webp 를 받지 않는다. 그대로 넘기면 파일 선택 창은
+ * 받아들이는 척하고 아무 일도 일어나지 않아서, 업로드가 시간 초과로 끝나고
+ * 썸네일이 빠진 글이 저장됐다.
+ *
+ * HTML 썸네일(png)은 늘 되는데 ChatGPT 것만 안 들어가던 이유가 이것이다.
+ */
+console.log('\n[4] 네이버가 받는 형식인가');
+
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  // 진짜로 디코딩되는 webp 를 크로미움으로 만든다. 손으로 바이트를 적으면
+  // 정말 읽히는 그림인지 알 수 없다.
+  const webpUri = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 320;
+    canvas.height = 180;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1478dc';
+    ctx.fillRect(0, 0, 320, 180);
+    ctx.fillStyle = '#fff';
+    ctx.font = '40px sans-serif';
+    ctx.fillText('TEST', 20, 100);
+    return canvas.toDataURL('image/webp');
+  });
+  await context.close();
+
+  await testAsync('webp 썸네일을 PNG 로 바꾼다', async () => {
+    if (!webpUri.startsWith('data:image/webp')) {
+      throw new Error(`webp 를 못 만들었습니다: ${webpUri.slice(0, 30)}`);
+    }
+    const png = await toNaverSafeDataUri(webpUri, 'check');
+    if (!png.startsWith('data:image/png;base64,')) {
+      throw new Error(`PNG 가 아닙니다: ${png.slice(0, 30)}`);
+    }
+    // 내용까지 진짜 PNG 여야 한다. 머리말만 바꿔 놓으면 네이버가 또 거절한다.
+    const bytes = Buffer.from(png.split(',')[1], 'base64');
+    if (bytes.slice(1, 4).toString() !== 'PNG') throw new Error('내용이 PNG 가 아닙니다');
+    if (bytes.length < 200) throw new Error(`너무 작습니다 (${bytes.length}바이트)`);
+  });
+
+  await testAsync('네이버가 받는 형식은 그대로 둔다', async () => {
+    // 쓸데없이 다시 그리면 화질만 떨어지고 시간도 버린다.
+    const png = 'data:image/png;base64,iVBORw0KGgo=';
+    const jpg = 'data:image/jpeg;base64,/9j/4AAQSkZJRg==';
+    if ((await toNaverSafeDataUri(png, 'check')) !== png) throw new Error('PNG 을 건드렸습니다');
+    if ((await toNaverSafeDataUri(jpg, 'check')) !== jpg) throw new Error('JPEG 를 건드렸습니다');
+  });
+
+  await closeRenderBrowser().catch(() => {});
+}
+
+console.log('\n[5] 붙여넣기 성공 문턱');
 
 test('넣으려던 분량의 60% 는 들어가야 성공으로 본다', () => {
   const text = '가'.repeat(1000);
