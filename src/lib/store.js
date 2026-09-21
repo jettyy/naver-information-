@@ -87,6 +87,8 @@ export function addTopics(topics, requestId = '') {
       requestId,
       // 발굴로 들어온 주제에만 채워진다. 직접 적은 주제는 빈 값이다.
       bigTopic: pick.bigTopic || '',
+      // true 면 이 글의 제목을 **적어준 그대로** 쓴다. AI 가 제목을 고치지 못한다.
+      fixedTitle: Boolean(pick.fixedTitle),
       why: pick.why || '',
       score: Number(pick.score) || 0,
       searchTerms: pick.searchTerms || [],

@@ -272,8 +272,39 @@ const FORMAT_BLOCK = [
 /* 프롬프트 조립                                                        */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 제목을 정해 준 글에 붙이는 블록.
+ *
+ * 평소에는 주제를 주면 AI 가 제목을 새로 짓는다. 그런데 제목까지 정해 두고
+ * **그 제목에 맞는 글**을 받고 싶을 때가 있다. 그때는 제목을 못 바꾸게 막고,
+ * 글 전체가 그 제목이 약속한 내용을 지키도록 요구한다.
+ *
+ * 제목이 약속을 하면(예: "TOP 50") 본문이 그 약속을 지켜야 한다는 점을
+ * 분명히 적어 둔다. 이게 없으면 제목만 따르고 내용은 딴 데로 간다.
+ */
+export function fixedTitleBlock(title) {
+  const text = String(title || '').trim();
+  if (!text) return '';
+  return `[제목 — 정해져 있습니다. 바꾸지 마세요]
+이 글의 제목은 다음과 같이 **이미 정해져 있습니다.**
+
+  ${text}
+
+- title 필드에 위 문장을 **글자 하나 바꾸지 말고 그대로** 넣으세요.
+  다듬거나, 줄이거나, 연도를 고치거나, 표현을 바꾸지 마세요.
+- 글 전체는 **이 제목이 약속한 내용**을 그대로 지켜야 합니다.
+  제목에 개수가 있으면(TOP 50, 7가지) 본문에서 그 개수를 채우세요.
+  제목이 비교를 약속하면 비교를 하고, 방법을 약속하면 방법을 쓰세요.
+- 제목에서 벗어난 이야기로 분량을 채우지 마세요.
+- 제목에 쓰인 말을 본문 앞쪽에도 자연스럽게 넣으세요. 검색에 그대로 걸립니다.
+
+============================================================
+
+`;
+}
+
 function buildMainPrompt(topic, settings, {
-  guidelineBlock, exampleBlock, researchBlock, shape, count,
+  guidelineBlock, exampleBlock, researchBlock, shape, count, fixedTitle = '',
 }) {
   const withTableRows = shape !== 'table';   // 큰 표는 뒤에서 따로 채운다.
   const tableHint = withTableRows
@@ -281,7 +312,7 @@ function buildMainPrompt(topic, settings, {
     : `- 이 글에는 ${count}개 항목이 들어간 큰 표가 하나 들어갑니다. `
       + '표의 행은 뒤에서 따로 채우므로 지금은 headers 와 heading, note 만 잡고 rows 는 넣지 마세요.';
 
-  return `${guidelineBlock}${basicsBlock(settings, topic)}
+  return `${guidelineBlock}${fixedTitleBlock(fixedTitle)}${basicsBlock(settings, topic)}
 
 위 주제로 네이버 블로그에 올릴 정보성 포스팅 한 편을 써주세요.
 ${researchBlock ? `\n${researchBlock}` : ''}
@@ -382,8 +413,10 @@ function normalizeFaq(raw) {
     .slice(0, 8);
 }
 
-export function normalize(raw, topic, settings, shape = 'general') {
-  const title = String(raw.title || topic).trim().slice(0, 100);
+export function normalize(raw, topic, settings, shape = 'general', fixedTitle = '') {
+  // 제목을 정해 준 글은 AI 가 무슨 제목을 지어 왔든 그것을 쓴다.
+  // 프롬프트로도 못 박지만, 모델이 제목을 다듬어 보내는 일이 잦아서 여기서 한 번 더 막는다.
+  const title = String(fixedTitle || raw.title || topic).trim().slice(0, 100);
 
   const sections = (Array.isArray(raw.sections) ? raw.sections : [])
     .map((section) => ({
@@ -497,7 +530,9 @@ export { countChars };
  * 준수 검사에서 걸린 항목만 짚어 다시 쓰게 한다.
  * 규칙이 통과할 때까지 최대 maxRepairs 번 돈다.
  */
-async function repairUntilCompliant(post, { topic, settings, systemPrompt, signal, onProgress }) {
+async function repairUntilCompliant(post, {
+  topic, settings, systemPrompt, signal, onProgress, fixedTitle = '',
+}) {
   let current = post;
   current.compliance = checkCompliance(current, settings);
 
@@ -515,6 +550,7 @@ async function repairUntilCompliant(post, { topic, settings, systemPrompt, signa
       buildRepairBlock(current.compliance),
       '',
       '============================================================',
+      fixedTitle ? `제목(바꾸지 말 것): "${fixedTitle}"` : '',
       `주제: "${topic}"`,
       '',
       '[현재 글 — 이것을 고쳐서 전체를 다시 출력하세요]',
@@ -537,7 +573,7 @@ async function repairUntilCompliant(post, { topic, settings, systemPrompt, signa
 
     let repaired;
     try {
-      repaired = normalize(reply.data, topic, settings, current.shape);
+      repaired = normalize(reply.data, topic, settings, current.shape, fixedTitle);
     } catch (error) {
       logger.warn(`[${topic}] 보정 결과를 읽지 못했습니다: ${error.message}`);
       break;
@@ -570,6 +606,8 @@ async function repairUntilCompliant(post, { topic, settings, systemPrompt, signa
 
 export async function generatePost(topic, options = {}) {
   const settings = getSettings();
+  // 제목을 정해 준 글이면 AI 가 제목을 못 바꾼다.
+  const fixedTitle = String(options.fixedTitle || '').trim();
   const guideline = String(settings.post.extraGuideline || '').trim();
   const guidelineBlock = buildGuidelineBlock(guideline);
   const exampleBlock = buildExampleBlock();
@@ -581,6 +619,7 @@ export async function generatePost(topic, options = {}) {
       { items: '항목별 상세형', table: '대형 비교표형', general: '정보 정리형' }[shape]
     }${count ? ` (${count}개 항목)` : ''}`,
   );
+  if (fixedTitle) logger.info(`[${topic}] 제목을 정해진 그대로 씁니다: "${fixedTitle}"`);
   if (guideline) logger.info(`추가 지침 적용: ${guideline.replace(/\s+/g, ' ').slice(0, 120)}`);
   if (exampleBlock) logger.info('참고 예시를 프롬프트에 함께 넣었습니다.');
   if (count && count > ITEM_LIMIT) {
@@ -602,11 +641,13 @@ export async function generatePost(topic, options = {}) {
 
   /* 2단계 — 도구를 끄고, 모아온 자료만 보고 글을 쓴다. */
   const reply = await runClaudeJson(
-    buildMainPrompt(topic, settings, { guidelineBlock, exampleBlock, researchBlock, shape, count }),
+    buildMainPrompt(topic, settings, {
+      guidelineBlock, exampleBlock, researchBlock, shape, count, fixedTitle,
+    }),
     { systemPrompt, signal: options.signal },
   );
 
-  let post = normalize(reply.data, topic, settings, shape);
+  let post = normalize(reply.data, topic, settings, shape, fixedTitle);
   post.model = reply.model || '';
   post.costUsd = (reply.costUsd || 0) + (research?.costUsd || 0);
   post.research = research;
@@ -666,7 +707,10 @@ export async function generatePost(topic, options = {}) {
     systemPrompt,
     signal: options.signal,
     onProgress: options.onCompliance,
+    fixedTitle,
   });
+
+  post.fixedTitle = Boolean(fixedTitle);
 
   return post;
 }

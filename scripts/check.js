@@ -20,6 +20,7 @@ import {
   buildTableHtml, htmlToPlainText, buildPreviewHtml, stripUrls,
 } from '../src/content/naver.js';
 import { buildMarkdown } from '../src/content/markdown.js';
+import { normalize, fixedTitleBlock } from '../src/content/generator.js';
 import { DEFAULT_SETTINGS, saveSettings, getSettings, publicSettings } from '../src/lib/settings.js';
 import { detectShape, compactRanking } from '../src/content/ranking.js';
 import {
@@ -1041,6 +1042,81 @@ test('손으로 넣은 주제를 발굴한 주제보다 먼저 쓴다', () => {
   addTopics(['직접 적은 주제입니다']);
   assert.equal(nextPending().topic, '직접 적은 주제입니다');
   clearJobs(false);
+});
+
+test('제목을 정해 넣으면 AI 가 지은 제목을 무시한다', () => {
+  // 프롬프트로도 못 박지만 모델이 제목을 다듬어 보내는 일이 잦다.
+  // 여기서 한 번 더 막지 않으면 "제목 그대로 쓰기" 가 제목 추천이 되어버린다.
+  const fixed = '2026년 수도권 대학 순위 TOP 50 총정리';
+  const post = normalize(
+    {
+      title: 'AI가 멋대로 다듬은 제목입니다',
+      intro: ['도입 문단입니다.'],
+      sections: [{ heading: '소제목', paragraphs: ['본문입니다.'] }],
+      outro: ['마무리입니다.'],
+    },
+    '아무 주제',
+    settings,
+    'table',
+    fixed,
+  );
+  assert.equal(post.title, fixed, '정해준 제목이 안 쓰였습니다');
+});
+
+test('제목을 안 정하면 AI 가 지은 제목을 쓴다', () => {
+  const post = normalize(
+    {
+      title: 'AI가 지은 제목입니다',
+      intro: ['도입 문단입니다.'],
+      sections: [{ heading: '소제목', paragraphs: ['본문입니다.'] }],
+      outro: ['마무리입니다.'],
+    },
+    '아무 주제',
+    settings,
+    'general',
+  );
+  assert.equal(post.title, 'AI가 지은 제목입니다');
+});
+
+test('정해진 제목은 프롬프트에 그대로 들어간다', () => {
+  const fixed = '대기업 평균 연봉 순위 TOP 30, 어디가 가장 높을까';
+  const block = fixedTitleBlock(fixed);
+  assert.ok(block.includes(fixed), '제목이 프롬프트에 안 들어갔습니다');
+  assert.ok(block.includes('그대로'), '바꾸지 말라는 지시가 없습니다');
+  // 제목만 따르고 내용이 딴 데로 가면 소용이 없다.
+  assert.ok(block.includes('개수를 채우세요'), '제목의 약속을 지키라는 지시가 없습니다');
+  // 제목을 안 정했으면 이 블록이 통째로 빠져야 한다.
+  assert.equal(fixedTitleBlock(''), '');
+  assert.equal(fixedTitleBlock('   '), '');
+});
+
+test('제목 고정 표시가 주제와 함께 저장된다', () => {
+  clearJobs(false);
+  addTopics([
+    { topic: '제목을 정해 넣은 글입니다', fixedTitle: true },
+    { topic: '평범하게 넣은 주제입니다' },
+  ]);
+  const jobs = listJobs();
+  assert.equal(jobs.find((job) => job.topic.startsWith('제목을')).fixedTitle, true);
+  assert.equal(jobs.find((job) => job.topic.startsWith('평범하게')).fixedTitle, false);
+  clearJobs(false);
+});
+
+test('여러 제목을 줄바꿈으로 한 번에 넣는다', () => {
+  // 한 줄에 하나씩 쭉 붙여넣는 것이 이 칸의 핵심이다.
+  const topics = parseTopics([
+    '2026년 수도권 대학 순위 TOP 50 총정리',
+    '',
+    '  대기업 평균 연봉 순위 TOP 30  ',
+    '2026년 수도권 대학 순위 TOP 50 총정리',
+    '전세 계약 전에 확인할 서류 7가지',
+  ].join('\n'));
+  // 빈 줄은 건너뛰고, 앞뒤 공백은 떼고, 같은 제목은 한 번만 들어간다.
+  assert.deepEqual(topics, [
+    '2026년 수도권 대학 순위 TOP 50 총정리',
+    '대기업 평균 연봉 순위 TOP 30',
+    '전세 계약 전에 확인할 서류 7가지',
+  ]);
 });
 
 test('주문을 닫으면 남은 대기 주제가 건너뜀으로 정리된다', () => {

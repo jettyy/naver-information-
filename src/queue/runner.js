@@ -125,6 +125,8 @@ async function processJob(job) {
   logger.step(`[${job.topic}] 글 생성 시작`, { jobId: job.id });
 
   const post = await generatePost(job.topic, {
+    // 제목을 정해 넣은 주제면 그 문장을 글 제목으로 그대로 쓴다.
+    fixedTitle: job.fixedTitle ? job.topic : '',
     signal: state.abort?.signal,
     onResearch: () => {
       if (!settings.research.enabled) return;

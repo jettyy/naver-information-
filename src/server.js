@@ -295,15 +295,39 @@ app.post('/api/topics/preview', wrap(async (req, res) => {
   res.json({ ok: true, count: topics.length, topics: topics.slice(0, 200) });
 }));
 
+/**
+ * 주제(또는 제목)를 직접 넣는 통로.
+ *
+ * `fixedTitle` 이 true 면 **적어준 문장을 글 제목으로 그대로 쓴다.**
+ * 평소에는 AI 가 주제를 보고 제목을 새로 지어내는데, 제목까지 정해 두고
+ * 거기에 맞춰 쓰게 하고 싶을 때가 있어서 나눠 둔다.
+ */
 app.post('/api/topics', wrap(async (req, res) => {
   const topics = parseTopics(req.body?.raw || '');
+  const fixedTitle = req.body?.fixedTitle === true;
+  const what = fixedTitle ? '제목' : '주제';
   if (!topics.length) {
-    res.status(400).json({ ok: false, message: '주제를 한 줄에 하나씩 붙여넣어 주세요.' });
+    res.status(400).json({ ok: false, message: `${what}을 한 줄에 하나씩 붙여넣어 주세요.` });
     return;
   }
-  const added = addTopics(topics);
-  logger.info(`주제 ${added.length}건을 추가했습니다. (붙여넣기 ${topics.length}건, 중복 제외)`);
-  res.json({ ok: true, added: added.length, skipped: topics.length - added.length, jobs: listJobs() });
+  const added = addTopics(topics.map((topic) => ({ topic, fixedTitle })));
+  logger.info(
+    `${fixedTitle ? '정해진 제목' : '주제'} ${added.length}건을 추가했습니다. `
+    + `(붙여넣기 ${topics.length}건, 중복 제외)`,
+  );
+
+  // 넣었으면 바로 돌기 시작한다. [실행] 을 또 누르게 하지 않는다.
+  const started = runner.ensureRunning();
+  if (!started.ok) logger.warn(`목록에 넣었지만 아직 실행하지 못합니다: ${started.message}`);
+
+  res.json({
+    ok: true,
+    added: added.length,
+    skipped: topics.length - added.length,
+    jobs: listJobs(),
+    started: started.ok,
+    startMessage: started.ok ? '' : started.message,
+  });
 }));
 
 app.delete('/api/jobs/:id', wrap(async (req, res) => {

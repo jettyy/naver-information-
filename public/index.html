@@ -106,6 +106,7 @@
     <div class="row">
       <button class="btn" id="btn-discover">미리 보기만 (대기열에 넣지 않고 확인)</button>
       <button class="btn ghost small" id="btn-manual-toggle">직접 주제 추가</button>
+      <button class="btn ghost small" id="btn-title-toggle">제목 그대로 쓰기</button>
       <button class="btn ghost small" id="btn-clear-orders">끝난 주문 정리</button>
       <button class="btn ghost small danger" id="btn-clear-all-orders">대기열 전체 삭제</button>
       <button class="btn ghost small danger" id="btn-clear-history">발굴 기록 지우기</button>
@@ -131,6 +132,24 @@
       <div class="row">
         <button class="btn primary" id="btn-add">목록에 추가</button>
         <button class="btn ghost" id="btn-clear-text">입력 지우기</button>
+      </div>
+    </div>
+
+    <div id="title-box" class="hidden">
+      <div class="divider-line"></div>
+      <div class="card-head tight">
+        <h3>제목 그대로 쓰기</h3>
+        <span class="hint" id="title-count">0개 인식</span>
+      </div>
+      <p class="note tight">여기 넣은 문장은 <b>글 제목이 됩니다.</b> AI가 제목을 다시 짓지 않고,
+        적어주신 문장 그대로 쓰고 <b>그 제목이 약속한 내용</b>에 맞춰 본문을 씁니다.<br>
+        <b>한 줄에 제목 하나씩</b> 쭉 붙여넣으세요. 줄마다 따로따로 목록에 들어갑니다.
+        제목에 <b>TOP 50</b> 처럼 개수가 들어 있으면 그 개수만큼 순위를 매깁니다.</p>
+      <textarea id="titles" rows="6" spellcheck="false"
+        placeholder="한 줄에 제목 하나씩.&#10;&#10;예)&#10;2026년 수도권 대학 순위 TOP 50 총정리&#10;대기업 평균 연봉 순위 TOP 30, 어디가 가장 높을까&#10;전세 계약 전에 반드시 확인해야 하는 서류 7가지"></textarea>
+      <div class="row">
+        <button class="btn primary" id="btn-title-add">목록에 추가</button>
+        <button class="btn ghost" id="btn-title-clear">입력 지우기</button>
       </div>
     </div>
 

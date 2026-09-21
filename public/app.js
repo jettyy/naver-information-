@@ -238,7 +238,10 @@ function renderJobs() {
         : '';
       return `<tr class="${job.id === current ? 'active' : ''}">
         <td>${index + 1}</td>
-        <td class="topic"${job.why ? ` title="${escapeHtml(job.why)}"` : ''}>${escapeHtml(job.topic)}</td>
+        <td class="topic"${job.why ? ` title="${escapeHtml(job.why)}"` : ''}>${escapeHtml(job.topic)}${
+        job.fixedTitle
+          ? ' <span class="check-note" title="이 문장을 글 제목으로 그대로 씁니다.">제목 고정</span>'
+          : ''}</td>
         <td>${scoreCell(job)}</td>
         <td><span class="badge ${job.status}">${label}</span></td>
         <td class="msg"${job.detail ? ` title="${escapeHtml(job.detail)}"` : ''}>${job.title ? `<b>${escapeHtml(job.title)}</b>` : ''}${escapeHtml(job.message || '')}
@@ -904,6 +907,48 @@ $('btn-add').onclick = async () => {
 $('btn-clear-text').onclick = () => {
   $('topics').value = '';
   $('paste-count').textContent = '0개 인식';
+};
+
+/* ---------- 제목 그대로 쓰기 ---------- */
+
+/*
+ * 주제가 아니라 **제목**을 정해서 넣는 칸이다.
+ * 여기 넣은 문장은 AI 가 다시 짓지 않고 글 제목으로 그대로 쓰인다.
+ * 줄바꿈으로 여러 개를 한 번에 넣는 것은 위 "직접 주제 추가" 와 같다.
+ */
+$('btn-title-toggle').onclick = () => {
+  const box = $('title-box');
+  box.classList.toggle('hidden');
+  if (!box.classList.contains('hidden')) $('titles').focus();
+};
+
+let titleTimer = null;
+$('titles').addEventListener('input', () => {
+  clearTimeout(titleTimer);
+  titleTimer = setTimeout(async () => {
+    const data = await api('/api/topics/preview', { method: 'POST', body: { raw: $('titles').value } });
+    $('title-count').textContent = `${data.count}개 인식`;
+  }, 250);
+});
+
+$('btn-title-add').onclick = async () => {
+  const raw = $('titles').value;
+  if (!raw.trim()) return toast('먼저 제목을 붙여넣어 주세요.');
+  const data = await api('/api/topics', { method: 'POST', body: { raw, fixedTitle: true } });
+  state.jobs = data.jobs;
+  renderJobs();
+  await refreshState();
+  $('titles').value = '';
+  $('title-count').textContent = '0개 인식';
+  toast(
+    `제목 ${data.added}건 추가${data.skipped ? ` (중복 ${data.skipped}건 제외)` : ''}`
+    + `${data.started ? '' : ` — ${data.startMessage || '아직 실행하지 못합니다'}`}`,
+  );
+};
+
+$('btn-title-clear').onclick = () => {
+  $('titles').value = '';
+  $('title-count').textContent = '0개 인식';
 };
 
 /* 추가 지침 — 저장 버튼을 누르지 않아도 자동으로 저장한다. */
