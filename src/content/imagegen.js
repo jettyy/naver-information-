@@ -700,7 +700,13 @@ export async function maybeGenerateImage(spec, { signal, width, height, jobId = 
       return { ...result, mode: image.mode };
     } catch (error) {
       // 그림은 글의 부속물이다. 여기서 실패했다고 1,800자짜리 글을 버리지 않는다.
-      logger.warn(`ChatGPT 썸네일 실패, HTML 썸네일로 만듭니다: ${error.message}`, { jobId });
+      // 다만 **왜** 물러섰는지는 분명히 남긴다. 이게 없으면 그림이 화면에 멀쩡히
+      // 떠 있는데도 HTML 썸네일만 올라가는 이유를 알 수가 없다.
+      logger.warn(
+        `ChatGPT 썸네일 실패, HTML 썸네일로 만듭니다: ${error.message}`
+        + (error.screenshot ? ` — 그때 화면: ${error.screenshot}` : ''),
+        { jobId },
+      );
       return null;
     }
   }

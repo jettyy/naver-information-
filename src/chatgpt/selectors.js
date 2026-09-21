@@ -5,7 +5,16 @@
  * 후보를 여러 개 두고 먼저 잡히는 것을 쓴다. 자동화가 깨지면 대부분
  * 이 파일만 손보면 된다. (`data/screenshots/` 의 캡처를 같이 보세요)
  */
-export const CHATGPT_URL = 'https://chatgpt.com/';
+/**
+ * ChatGPT 주소.
+ *
+ * 환경변수로 바꿀 수 있게 열어 둔 것은 **점검용**이다. 가짜 화면을 띄워
+ * 전체 흐름(요청 → 그림 찾기 → 내려받기 → 썸네일 저장)을 실제로 돌려 보려면
+ * 주소를 갈아끼울 구멍이 하나 필요하다. 평소에는 건드리지 않는다.
+ */
+export function chatGptUrl() {
+  return process.env.CHATGPT_URL || 'https://chatgpt.com/';
+}
 
 export const SELECTORS = {
   // 입력창이 떴는지 = 로그인이 되어 있고 새 대화가 열렸다는 뜻

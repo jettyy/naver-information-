@@ -13,12 +13,14 @@
  *   - http 주소와 blob: 주소 **둘 다** 실제로 내려받아지는가
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
 import zlib from 'node:zlib';
 import { chromium } from 'playwright';
 import { withExecutable, ensureBrowsers } from '../src/lib/playwright.js';
 import {
   typePrompt, findImageUrl, downloadImage, flattenPrompt, buildChatPrompt,
+  collectImages, describeImages,
 } from '../src/chatgpt/image.js';
 
 /* ------------------------------------------------------------------ */
@@ -50,8 +52,14 @@ function chunk(type, data) {
   return Buffer.concat([head, data, crc]);
 }
 
-/** 한 가지 색으로 채운 PNG. naturalWidth 검사를 위해 크기를 정확히 만든다. */
-function solidPng(width, height, [r, g, b]) {
+/**
+ * PNG 한 장을 만든다.
+ *
+ * `noise` 를 주면 픽셀마다 값을 흔들어 **압축이 잘 안 되게** 한다.
+ * 단색으로 만들면 수백 바이트로 줄어들어서, 받아온 그림이 원본인지
+ * 화면을 찍은 것인지 크기로 구별할 수가 없다.
+ */
+function solidPng(width, height, [r, g, b], noise = 0) {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
@@ -62,9 +70,10 @@ function solidPng(width, height, [r, g, b]) {
     const row = y * (width * 3 + 1);
     raw[row] = 0;         // filter: none
     for (let x = 0; x < width; x += 1) {
-      raw[row + 1 + x * 3] = r;
-      raw[row + 2 + x * 3] = g;
-      raw[row + 3 + x * 3] = b;
+      const jitter = noise ? ((x * 2654435761 + y * 40503) % noise) : 0;
+      raw[row + 1 + x * 3] = (r + jitter) & 0xff;
+      raw[row + 2 + x * 3] = (g + jitter) & 0xff;
+      raw[row + 3 + x * 3] = (b + jitter) & 0xff;
     }
   }
   return Buffer.concat([
@@ -75,7 +84,7 @@ function solidPng(width, height, [r, g, b]) {
   ]);
 }
 
-const BIG_PNG = solidPng(320, 180, [20, 120, 220]);     // "생성된 그림"
+const BIG_PNG = solidPng(320, 180, [20, 120, 220], 97);  // "생성된 그림" (압축이 잘 안 되게)
 const ICON_PNG = solidPng(32, 32, [200, 200, 200]);     // 아이콘 (작다)
 
 /* ------------------------------------------------------------------ */
@@ -146,9 +155,15 @@ const server = http.createServer((req, res) => {
     res.end(pageHtml);
     return;
   }
-  if (req.url.startsWith('/backend-api/files/')) {
+  if (req.url.startsWith('/backend-api/files/') || req.url.startsWith('/brand-new-host/')) {
     res.writeHead(200, { 'Content-Type': 'image/png' });
     res.end(BIG_PNG);
+    return;
+  }
+  // 로그인이 풀렸을 때처럼 그림 주소로 HTML 이 오는 경우.
+  if (req.url.startsWith('/login-wall.png')) {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<h1>로그인이 필요합니다</h1>');
     return;
   }
   if (req.url.startsWith('/icon')) {
@@ -265,6 +280,68 @@ try {
     assert.ok(url.endsWith('aaaa-made.png'), `엉뚱한 그림을 집었습니다: ${url}`);
   });
 
+  await test('처음 보는 주소로 와도 크기만 맞으면 찾아낸다', async () => {
+    /*
+     * 이것 때문에 실제로 실패했다. 주소 목록에만 기대면, ChatGPT 가 주소를
+     * 바꾸는 순간 그림이 화면에 멀쩡히 떠 있는데도 못 찾고 HTML 썸네일이 올라간다.
+     */
+    await page.evaluate((src) => {
+      document.getElementById('thread').innerHTML =
+        '<div data-message-author-role="assistant">'
+        + '<img alt="avatar" src="https://cdn.example.com/avatar.png" width="32" height="32">'
+        + `<img alt="made" src="${src}">`
+        + '</div>';
+    }, `${base}/brand-new-host/thumb.png`);
+    await page.waitForFunction(() => {
+      const img = document.querySelector('img[alt="made"]');
+      return img && img.complete && img.naturalWidth > 0;
+    }, null, { timeout: 10000 });
+
+    const url = await findImageUrl(page);
+    assert.ok(url.includes('brand-new-host'), `못 찾았거나 엉뚱한 것을 집었습니다: ${url}`);
+  });
+
+  await test('내려받기가 막히면 화면에 그려진 그림을 찍어서라도 쓴다', async () => {
+    /*
+     * 그림 주소로 HTML 이 와도(로그인 만료 등) 화면에는 그림이 떠 있다.
+     * 거기서 포기하면 HTML 썸네일이 올라간다. 찍어서라도 쓰는 편이 낫다.
+     */
+    await page.evaluate((src) => {
+      document.getElementById('thread').innerHTML =
+        '<div data-message-author-role="assistant">'
+        + `<img alt="made" src="${src}" width="400" height="220">`
+        + '</div>';
+    }, `${base}/brand-new-host/shot.png`);
+    await page.waitForTimeout(500);
+
+    /*
+     * 내려받으면 HTML 이 오는 주소를 **srcset** 에 건다. 그러면 실제로 보이는
+     * 주소(currentSrc)와 src 속성이 서로 달라진다. src 속성만 보고 화면에서
+     * 그림을 집는 코드는 여기서 못 찾는다.
+     */
+    await page.evaluate(([bad, good]) => {
+      const img = document.querySelector('img[alt="made"]');
+      img.setAttribute('src', good);
+      img.setAttribute('srcset', `${bad} 1x`);
+    }, [`${base}/login-wall.png`, `${base}/brand-new-host/shot.png`]);
+    await page.waitForTimeout(800);
+
+    const shown = await page.evaluate(() => document.querySelector('img[alt="made"]').currentSrc);
+    assert.ok(shown.includes('login-wall'), `테스트 준비가 잘못됐습니다: ${shown}`);
+
+    const dataUri = await downloadImage(page, shown);
+    assert.ok(dataUri.startsWith('data:image/png;base64,'), `이상한 값: ${dataUri.slice(0, 40)}`);
+  });
+
+  await test('못 찾았을 때 화면에 뭐가 있었는지 남긴다', async () => {
+    // 이 한 줄이 없으면 왜 실패했는지 알 방법이 없다.
+    const images = await collectImages(page);
+    const text = describeImages(images);
+    assert.ok(text.length > 0);
+    assert.ok(/x\d+/.test(text) || text.includes('하나도 없습니다'), `쓸모없는 설명: ${text}`);
+    assert.equal(describeImages([]), '화면에 <img> 가 하나도 없습니다.');
+  });
+
   await test('답변에 그림이 없으면 빈 값을 준다', async () => {
     await page.evaluate(() => {
       document.getElementById('thread').innerHTML =
@@ -275,8 +352,86 @@ try {
 } finally {
   await context.close().catch(() => {});
   await browser.close().catch(() => {});
-  server.close();
 }
 
+/* ------------------------------------------------------------------ */
+/* [2] 처음부터 끝까지                                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 조각마다 통과해도 이어 붙였을 때 안 될 수 있다. 실제로 그랬다.
+ * ChatGPT 에서 그림은 잘 만들어졌는데 그걸 가져오지 못하고, 조용히
+ * HTML 썸네일이 대신 올라갔다.
+ *
+ * 그래서 가짜 ChatGPT 를 진짜 주소인 척 세워 두고
+ * **renderThumbnail 까지 통째로** 돌려서, 나온 썸네일이 정말로
+ * ChatGPT 에서 받아온 그림인지 확인한다.
+ */
+console.log('\n[2] 썸네일이 실제로 ChatGPT 그림으로 저장되는가');
+
+process.env.CHATGPT_URL = `${base}/`;
+const { saveSettings, DEFAULT_SETTINGS } = await import('../src/lib/settings.js');
+const { renderThumbnail } = await import('../src/content/thumbnail.js');
+const { closeChatGptContext } = await import('../src/chatgpt/browser.js');
+const { closeRenderBrowser } = await import('../src/lib/playwright.js');
+
+const SPEC = {
+  headline: '국가기술자격증 TOP 5',
+  posterLines: ['취업에 바로 쓰는', '국가기술자격증 TOP 5'],
+  ribbon: '2026 최신',
+  subline: '취업률과 활용성으로 골랐습니다',
+  badge: '자격증',
+  keywords: ['전기', '용접', '정보처리'],
+  scene: 'a bright technical college workshop',
+  style: 'minimal',
+  accent: '#16324F',
+};
+
+const before = saveSettings({});
+try {
+  pageHtml = fakePage(`${base}/brand-new-host/thumb.png`);
+  saveSettings({
+    image: { enabled: true, provider: 'chatgpt', mode: 'full', chatgpt: { waitMs: 60000 } },
+    run: { headless: true },
+  });
+
+  await test('ChatGPT 그림이 그대로 썸네일 파일이 된다', async () => {
+    const result = await renderThumbnail({ title: '점검용 글', thumbnail: SPEC }, { jobId: 'check' });
+    // HTML 썸네일로 물러섰으면 여기서 걸린다. 그게 이 검사의 전부다.
+    assert.equal(result.generated, true, 'HTML 썸네일로 물러섰습니다');
+    assert.equal(result.mode, 'full', `mode 가 ${result.mode} 입니다`);
+
+    // 받아온 그림이 우리가 내려준 **바로 그 PNG** 여야 한다.
+    // (화면을 찍은 것이면 바이트가 다르다)
+    const saved = fs.readFileSync(result.filePath);
+    assert.ok(saved.equals(BIG_PNG), `ChatGPT 에서 받은 그림이 아닙니다 (${saved.length}바이트)`);
+    fs.rmSync(result.filePath, { force: true });
+  });
+
+  await test('그림을 못 찾으면 HTML 썸네일로 물러선다', async () => {
+    // 그림 없이 글로만 답하는 화면. 여기서 글이 막히면 안 된다.
+    pageHtml = fakePage('').replace(/<img[^>]*>/g, '');
+    saveSettings({ image: { chatgpt: { waitMs: 30000 } } });
+
+    const result = await renderThumbnail({ title: '점검용 글2', thumbnail: SPEC }, { jobId: 'check2' });
+    assert.equal(result.generated, false, 'HTML 썸네일로 안 물러섰습니다');
+    assert.ok(fs.existsSync(result.filePath), '썸네일이 아예 안 만들어졌습니다');
+    fs.rmSync(result.filePath, { force: true });
+  });
+} finally {
+  saveSettings({
+    image: {
+      enabled: before.image.enabled,
+      provider: before.image.provider,
+      mode: before.image.mode,
+      chatgpt: { waitMs: DEFAULT_SETTINGS.image.chatgpt.waitMs },
+    },
+    run: { headless: before.run.headless },
+  });
+  await closeChatGptContext().catch(() => {});
+  await closeRenderBrowser().catch(() => {});
+}
+
+server.close();
 console.log(failures ? `\n실패 ${failures}건\n` : '\n모두 통과했습니다.\n');
 process.exit(failures ? 1 : 0);

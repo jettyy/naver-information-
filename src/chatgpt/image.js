@@ -85,70 +85,213 @@ export async function typePrompt(page, text) {
 }
 
 /**
- * 답변에 붙은 **생성된 그림**의 주소를 찾는다.
+ * 화면에 있는 모든 <img> 를 재 본다.
  *
- * 말풍선 안에는 아바타와 아이콘도 <img> 로 들어 있다. 그것까지 집으면
- * 엉뚱한 그림이 썸네일로 올라가므로 주소로 한 번 거른다.
+ * 처음에는 "주소가 oaiusercontent 면 생성된 그림" 이라고 **주소만 보고** 골랐다.
+ * 그런데 ChatGPT 가 그림을 어느 주소로 내려주는지는 수시로 바뀐다. 목록에 없는
+ * 주소가 오면 그림이 화면에 멀쩡히 떠 있는데도 "못 찾았다" 로 끝나서, 결국
+ * HTML 썸네일이 올라갔다. 실제로 그 일이 있었다.
+ *
+ * 그래서 기준을 바꿨다. **크기가 진짜 신호다.**
+ * 생성된 그림은 크고(보통 1024px 이상), 아바타와 아이콘은 작다(16~80px).
+ * 주소는 이제 "확실하면 가산점" 정도로만 쓴다.
  */
-export async function findImageUrl(page) {
-  const sources = await page.evaluate((selectors) => {
-    const out = [];
+function scoreImage(img) {
+  const { src, naturalWidth: nw, naturalHeight: nh, width: rw, height: rh } = img;
+  if (!src) return null;
+
+  // 자리표시자와 1px 추적 픽셀.
+  if (/^data:image\/(gif|svg)/i.test(src)) return null;
+
+  /*
+   * 아직 다 안 불러온 그림은 natural 크기가 0 이다. 그때는 화면에 그려진
+   * 크기로 본다. 둘 다 작으면 아이콘이다.
+   */
+  const bigNatural = nw >= 256 && nh >= 200;
+  const bigRendered = rw >= 200 && rh >= 150;
+
+  if (!bigNatural && !bigRendered) {
+    /*
+     * 아직 아무 것도 안 불러온 그림은 크기가 전부 0 이다. 크기로는 판단할 수
+     * 없으니 여기서만 주소를 믿는다. 아이콘은 보통 width/height 가 정해져 있어
+     * 화면 크기가 0 이 아니라서 여기까지 오지 않는다.
+     */
+    const sizeUnknown = nw === 0 && nh === 0 && rw < 20 && rh < 20;
+    if (!sizeUnknown || !looksLikeGeneratedImage(src)) return null;
+    return 100 + (img.inAssistantTurn ? 200 : 0) + img.order;
+  }
+
+  let score = 0;
+  if (img.inAssistantTurn) score += 1000;        // 답변 안에 있는 그림이 우선
+  if (looksLikeGeneratedImage(src)) score += 500; // 아는 주소면 가산점
+  if (bigNatural) score += 200;
+  score += Math.min(200, Math.round(Math.max(nw, rw) / 10));
+  score += img.order;                             // 뒤에 있을수록(최신) 우선
+  return score;
+}
+
+/** 화면의 모든 <img> 를 크기·위치와 함께 걷어 온다. 진단 로그에도 쓴다. */
+export async function collectImages(page) {
+  return page.evaluate((selectors) => {
+    const assistants = [];
     for (const selector of selectors) {
-      for (const turn of document.querySelectorAll(selector)) {
-        for (const img of turn.querySelectorAll('img')) {
-          const src = img.currentSrc || img.src || '';
-          const big = (img.naturalWidth || 0) >= 256 && (img.naturalHeight || 0) >= 256;
-          if (src) out.push({ src, big });
-        }
-      }
+      for (const node of document.querySelectorAll(selector)) assistants.push(node);
+    }
+    const out = [];
+    let order = 0;
+    for (const img of document.querySelectorAll('img')) {
+      const box = img.getBoundingClientRect();
+      out.push({
+        src: img.currentSrc || img.src || '',
+        alt: (img.getAttribute('alt') || '').slice(0, 40),
+        naturalWidth: img.naturalWidth || 0,
+        naturalHeight: img.naturalHeight || 0,
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+        inAssistantTurn: assistants.some((turn) => turn.contains(img)),
+        order: (order += 1),
+      });
     }
     return out;
   }, SELECTORS.assistantTurn);
-
-  /*
-   * 뒤에서부터 본다. 마지막 답변에 붙은 것이 방금 만든 그림이다.
-   *
-   * 뒤집은 목록은 **한 번만** 만든다. reverse() 는 원본을 뒤집어 버리기 때문에,
-   * 두 번 부르면 두 번째 훑기는 도로 원래 순서가 된다. 그러면 답변 맨 앞의
-   * 작은 아이콘을 썸네일로 집어 온다. (실제로 그랬다)
-   */
-  const newestFirst = [...sources].reverse();
-
-  // 큰 그림을 먼저 찾는다. 아이콘은 작아서 여기서 걸러진다.
-  for (const { src, big } of newestFirst) {
-    if (looksLikeGeneratedImage(src) && big) return src;
-  }
-  // 아직 다 안 불러온 그림은 크기를 알 수 없다. 그때는 주소만 보고 고른다.
-  for (const { src } of newestFirst) {
-    if (looksLikeGeneratedImage(src)) return src;
-  }
-  return '';
 }
 
-/** 찾은 주소에서 실제 그림 바이트를 받아온다. 로그인 쿠키가 필요하다. */
+/**
+ * 방금 만든 그림의 주소를 고른다. 없으면 빈 문자열.
+ *
+ * @returns {Promise<string>}
+ */
+export async function findImageUrl(page, { ignore } = {}) {
+  const images = await collectImages(page);
+  let best = null;
+  let bestScore = -1;
+  for (const img of images) {
+    // 요청을 보내기 **전부터** 화면에 있던 그림은 방금 만든 것이 아니다.
+    // (ChatGPT 첫 화면의 큰 장식 그림을 집어 오던 것을 막는다)
+    if (ignore?.has(img.src)) continue;
+    const score = scoreImage(img);
+    if (score === null || score <= bestScore) continue;
+    best = img;
+    bestScore = score;
+  }
+  return best?.src || '';
+}
+
+/** 못 찾았을 때 로그에 남길 한 줄. 무엇이 화면에 있었는지 보여준다. */
+export function describeImages(images) {
+  if (!images.length) return '화면에 <img> 가 하나도 없습니다.';
+  return images
+    .slice(-8)
+    .map((img) => `${img.naturalWidth}x${img.naturalHeight}`
+      + `(화면 ${img.width}x${img.height})`
+      + `${img.inAssistantTurn ? ' 답변안' : ''} ${String(img.src).slice(0, 80)}`)
+    .join(' | ');
+}
+
+/**
+ * 찾은 주소에서 실제 그림 바이트를 받아온다.
+ *
+ * 한 가지 방법만 쓰면 그 하나가 막혔을 때 그림을 통째로 놓친다.
+ * (그러면 HTML 썸네일로 물러서는데, 정작 그림은 화면에 떠 있다)
+ * 그래서 세 가지를 차례로 시도한다.
+ *
+ *   1) 브라우저 세션으로 그 주소를 직접 받는다      — 원본 화질 그대로
+ *   2) 페이지 안에서 fetch 로 읽는다                 — 쿠키·CORS 가 필요한 경우
+ *   3) 화면에 그려진 그 <img> 를 통째로 찍는다       — 위 둘이 다 막혀도 된다
+ *
+ * 3번은 화질이 화면에 그려진 크기만큼이라 조금 떨어진다. 그래도 **글자 없는
+ * HTML 썸네일로 물러서는 것보다는 낫다.**
+ */
 export async function downloadImage(page, url) {
-  // blob: 주소는 서버가 아니라 브라우저 안에만 있다. 페이지 안에서 읽어야 한다.
-  if (/^blob:/i.test(url)) {
+  const problems = [];
+
+  // blob: 주소는 서버가 아니라 브라우저 안에만 있다. 페이지 안에서만 읽힌다.
+  const isBlob = /^blob:/i.test(url);
+
+  if (!isBlob) {
+    try {
+      const response = await page.context().request.get(url, { timeout: 60000 });
+      if (!response.ok()) throw new Error(`HTTP ${response.status()}`);
+      const type = (response.headers()['content-type'] || '').split(';')[0].trim();
+      // 로그인이 풀리면 그림 주소로 HTML 로그인 페이지가 온다. 그걸 저장하면 안 된다.
+      if (type && !/^image\//i.test(type)) throw new Error(`그림이 아닌 응답 (${type})`);
+      const buffer = await response.body();
+      // 빈 응답이나 오류 쪽지를 그림으로 착각하지 않을 만큼만 본다.
+      // 여기를 높게 잡으면 멀쩡한 그림까지 버리게 된다.
+      if (buffer.length < 200) throw new Error(`너무 작습니다 (${buffer.length}바이트)`);
+      return `data:${type || 'image/png'};base64,${buffer.toString('base64')}`;
+    } catch (error) {
+      problems.push(`직접 받기: ${error.message}`);
+    }
+  }
+
+  try {
     const dataUri = await page.evaluate(async (src) => {
-      const response = await fetch(src);
+      const response = await fetch(src, { credentials: 'include' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const blob = await response.blob();
+      if (!/^image\//i.test(blob.type || 'image/png')) throw new Error(`그림이 아님 (${blob.type})`);
       return await new Promise((resolve) => {
         const reader = new FileReader();
         reader.onloadend = () => resolve(String(reader.result || ''));
         reader.readAsDataURL(blob);
       });
     }, url);
-    if (!/^data:image\//i.test(dataUri)) throw new Error('그림을 읽지 못했습니다.');
+    if (!/^data:image\//i.test(dataUri)) throw new Error('그림 데이터가 아닙니다');
     return dataUri;
+  } catch (error) {
+    problems.push(`페이지에서 읽기: ${String(error.message).split('\n')[0]}`);
   }
 
-  // 일반 주소는 브라우저의 세션으로 받는다. 쿠키가 없으면 403 이 온다.
-  const response = await page.context().request.get(url, { timeout: 60000 });
-  if (!response.ok()) throw new Error(`그림을 내려받지 못했습니다 (HTTP ${response.status()}).`);
-  const buffer = await response.body();
-  const type = (response.headers()['content-type'] || 'image/png').split(';')[0].trim();
-  if (!/^image\//i.test(type)) throw new Error(`그림이 아닌 응답이 왔습니다 (${type}).`);
-  return `data:${type};base64,${buffer.toString('base64')}`;
+  // 마지막 수단 — 화면에 떠 있는 그 그림을 그대로 찍는다.
+  try {
+    /*
+     * src 속성으로 바로 찾으면 안 되는 경우가 있다. srcset 이 걸려 있으면
+     * 실제로 보이는 주소(currentSrc)와 src 속성이 다르기 때문이다.
+     * 그래서 페이지 안에서 둘 다 비교해 찾아 표시를 붙이고, 그걸로 집는다.
+     */
+    const tagged = await page.evaluate((target) => {
+      for (const img of document.querySelectorAll('img')) {
+        if ((img.currentSrc || img.src) !== target) continue;
+        img.setAttribute('data-inforush-shot', '1');
+        return true;
+      }
+      return false;
+    }, url);
+    if (!tagged) throw new Error('화면에서 그 그림을 못 찾았습니다');
+
+    const shot = await page.locator('img[data-inforush-shot="1"]').first()
+      .screenshot({ timeout: 20000 });
+    if (shot.length < 1024) throw new Error('찍힌 그림이 너무 작습니다');
+    logger.warn('그림을 내려받지 못해 화면에 그려진 것을 찍어서 씁니다. (화질이 조금 떨어집니다)');
+    return `data:image/png;base64,${shot.toString('base64')}`;
+  } catch (error) {
+    problems.push(`화면 찍기: ${String(error.message).split('\n')[0]}`);
+  }
+
+  throw new Error(`그림을 가져오지 못했습니다 — ${problems.join(' / ')}`);
+}
+
+/**
+ * 그림이 다 그려질 때까지 기다린다.
+ *
+ * ChatGPT 는 그리는 동안 흐릿한 중간 그림을 먼저 보여준다. 그걸 집으면
+ * 뭉개진 썸네일이 올라간다. 정지 버튼이 사라지면 다 그린 것이다.
+ */
+async function waitUntilSettled(page, { timeoutMs = 90000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let running = false;
+    for (const selector of SELECTORS.stop) {
+      if (await page.locator(selector).first().isVisible({ timeout: 500 }).catch(() => false)) {
+        running = true;
+        break;
+      }
+    }
+    if (!running) return true;
+    await page.waitForTimeout(1500);
+  }
+  return false;
 }
 
 /**
@@ -170,6 +313,11 @@ export async function generateViaChatGpt(imagePrompt, {
     await openNormalChat(page);
     const prompt = buildChatPrompt(imagePrompt, aspectRatio);
     logger.step('ChatGPT 에 썸네일 그림을 요청합니다. (새 일반 대화)', { jobId });
+
+    // 보내기 전에 화면에 있던 그림들을 적어 둔다. 이 뒤에 새로 생긴 것이
+    // 방금 만든 그림이다. 첫 화면의 장식 그림을 집어 오지 않게 한다.
+    const before = new Set((await collectImages(page).catch(() => [])).map((img) => img.src));
+
     await typePrompt(page, prompt);
 
     /*
@@ -179,24 +327,47 @@ export async function generateViaChatGpt(imagePrompt, {
      */
     const deadline = Date.now() + waitMs;
     let url = '';
+    let waited = 0;
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new Error('사용자가 중지했습니다.');
-      url = await findImageUrl(page).catch(() => '');
+      url = await findImageUrl(page, { ignore: before }).catch(() => '');
       if (url) break;
       await page.waitForTimeout(2500);
+      waited += 2500;
+      // 오래 걸릴 때 화면만 보고 있으면 멈춘 건지 그리는 중인지 알 수 없다.
+      if (waited % 30000 === 0) {
+        logger.info(`ChatGPT 가 아직 그리는 중입니다... (${waited / 1000}초)`, { jobId });
+      }
     }
 
     if (!url) {
+      const images = await collectImages(page).catch(() => []);
       const shot = await snap(page, jobId, 'no-image');
       const error = new Error(
         `ChatGPT 가 ${Math.round(waitMs / 1000)}초 안에 그림을 내놓지 않았습니다.`
         + ' (사용량 한도이거나 화면이 바뀌었을 수 있습니다)',
       );
       error.screenshot = shot;
+      // 화면에 무엇이 있었는지 남긴다. 이게 없으면 왜 못 찾았는지 알 방법이 없다.
+      logger.warn(`그때 화면에 있던 그림들: ${describeImages(images)}`, { jobId });
       throw error;
     }
 
-    const dataUri = await downloadImage(page, url);
+    // 다 그릴 때까지 기다렸다가 **주소를 다시 본다.**
+    // 그리는 중에는 흐릿한 중간 그림이 걸리고, 다 그리면 주소가 바뀐다.
+    if (await waitUntilSettled(page)) {
+      const settled = await findImageUrl(page, { ignore: before }).catch(() => '');
+      if (settled && settled !== url) url = settled;
+    }
+
+    let dataUri;
+    try {
+      dataUri = await downloadImage(page, url);
+    } catch (error) {
+      error.screenshot = await snap(page, jobId, 'download-failed');
+      logger.warn(`그림 주소: ${String(url).slice(0, 120)}`, { jobId });
+      throw error;
+    }
     const bytes = Math.round((dataUri.length - dataUri.indexOf(',') - 1) * 0.75);
     logger.info(`ChatGPT 에서 썸네일을 받았습니다. (${Math.round(bytes / 1024)}KB)`, { jobId });
 

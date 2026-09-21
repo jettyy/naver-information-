@@ -6,7 +6,7 @@ import {
 } from '../lib/paths.js';
 import { getSettings } from '../lib/settings.js';
 import { logger, push } from '../lib/events.js';
-import { CHATGPT_URL, SELECTORS, isTemporaryUrl } from './selectors.js';
+import { chatGptUrl, SELECTORS, isTemporaryUrl } from './selectors.js';
 
 /**
  * ChatGPT 세션을 다루는 곳.
@@ -149,13 +149,13 @@ export async function looksLoggedOut(page) {
  * 임시 채팅이면 반드시 끄고 일반 대화로 다시 연다.
  */
 export async function openNormalChat(page, { timeoutMs = 60000 } = {}) {
-  await page.goto(CHATGPT_URL, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+  await page.goto(chatGptUrl(), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
   await page.waitForTimeout(1500);
 
   // 1) 주소에 임시 채팅 표시가 남아 있으면 그것부터 떼고 다시 연다.
   if (isTemporaryUrl(page.url())) {
     logger.warn('임시 채팅으로 열려 일반 대화로 다시 엽니다.');
-    await page.goto(CHATGPT_URL, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await page.goto(chatGptUrl(), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     await page.waitForTimeout(1500);
   }
 
@@ -193,7 +193,7 @@ export async function verifyChatGptSession({ headless } = {}) {
   const ctx = await getChatGptContext(headless === undefined ? {} : { headless });
   const page = await ctx.newPage();
   try {
-    await page.goto(CHATGPT_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(chatGptUrl(), { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
 
     if (await looksLoggedOut(page)) {
@@ -218,7 +218,7 @@ export async function openChatGptLogin({ timeoutMs = 300000 } = {}) {
   const page = ctx.pages()[0] || (await ctx.newPage());
 
   logger.step('ChatGPT 로그인 창을 띄웠습니다. 창에서 직접 로그인해 주세요.');
-  await page.goto(CHATGPT_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+  await page.goto(chatGptUrl(), { waitUntil: 'domcontentloaded' }).catch(() => {});
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
