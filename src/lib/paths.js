@@ -23,6 +23,13 @@ export const HISTORY_FILE = path.join(DATA_DIR, 'topic-history.json');
 export const REQUESTS_FILE = path.join(DATA_DIR, 'requests.json');
 export const SESSION_FILE = path.join(DATA_DIR, 'naver-session.json');
 export const STORAGE_FILE = path.join(DATA_DIR, 'naver-cookies.json');
+
+// ChatGPT 에서 썸네일을 받아오는 기능용. 네이버와 **프로필을 나눈다.**
+// 한 프로필에 두 사이트 세션을 같이 두면 한쪽을 다시 로그인할 때
+// 다른 쪽까지 휩쓸려 풀린다.
+export const CHATGPT_PROFILE_DIR = path.join(DATA_DIR, 'chatgpt-profile');
+export const CHATGPT_SESSION_FILE = path.join(DATA_DIR, 'chatgpt-session.json');
+export const CHATGPT_STORAGE_FILE = path.join(DATA_DIR, 'chatgpt-cookies.json');
 export const IMAGE_MODEL_FILE = path.join(DATA_DIR, 'image-models.json');
 
 export function ensureDirs() {

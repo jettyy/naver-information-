@@ -21,6 +21,7 @@ import {
 } from '../src/content/naver.js';
 import { buildMarkdown } from '../src/content/markdown.js';
 import { normalize, fixedTitleBlock } from '../src/content/generator.js';
+import { isTemporaryUrl, looksLikeGeneratedImage } from '../src/chatgpt/selectors.js';
 import { DEFAULT_SETTINGS, saveSettings, getSettings, publicSettings } from '../src/lib/settings.js';
 import { detectShape, compactRanking } from '../src/content/ranking.js';
 import {
@@ -1190,6 +1191,43 @@ await testAsync('claude 가 프롬프트를 읽기 전에 죽어도 프로그램
   assert.ok(caught, '실패해야 하는데 성공으로 끝났습니다');
   // 죽지 않고, 진짜 원인(로그인 만료)까지 제대로 알아봐야 한다.
   assert.equal(caught.authExpired, true, `로그인 만료로 못 알아봤습니다: ${caught.message}`);
+});
+
+test('임시 채팅인지 주소로 알아본다', () => {
+  // 임시 채팅으로 만든 그림은 대화 기록에 안 남아 나중에 꺼낼 수가 없다.
+  // 이걸 못 알아보면 매번 기록 없는 그림을 받아오게 된다.
+  assert.equal(isTemporaryUrl('https://chatgpt.com/?temporary-chat=true'), true);
+  assert.equal(isTemporaryUrl('https://chatgpt.com/c/abc?foo=1&temporary-chat=true'), true);
+  assert.equal(isTemporaryUrl('https://chatgpt.com/'), false);
+  assert.equal(isTemporaryUrl('https://chatgpt.com/c/abc'), false);
+  // 이름만 비슷한 것에 걸리면 멀쩡한 대화를 임시로 잘못 본다.
+  assert.equal(isTemporaryUrl('https://chatgpt.com/?temporary-chat=false'), false);
+  assert.equal(isTemporaryUrl(''), false);
+});
+
+test('생성된 그림만 골라낸다', () => {
+  // 답변 안에는 아바타와 아이콘도 <img> 로 들어 있다.
+  assert.equal(looksLikeGeneratedImage('https://files.oaiusercontent.com/file-abc.png'), true);
+  assert.equal(looksLikeGeneratedImage('https://chatgpt.com/backend-api/files/abc'), true);
+  assert.equal(looksLikeGeneratedImage('blob:https://chatgpt.com/abc-123'), true);
+  assert.equal(looksLikeGeneratedImage('https://cdn.example.com/avatar.png'), false);
+  assert.equal(looksLikeGeneratedImage('/assets/sprite.svg'), false);
+  assert.equal(looksLikeGeneratedImage(''), false);
+  assert.equal(looksLikeGeneratedImage(null), false);
+});
+
+test('썸네일을 어디서 그릴지 설정이 대시보드로 내려간다', () => {
+  const saved = saveSettings({ image: { provider: 'chatgpt', chatgpt: { waitMs: 120000 } } });
+  assert.equal(saved.image.provider, 'chatgpt');
+  assert.equal(publicSettings().image.chatgpt.waitMs, 120000);
+  // 구글 API 키는 여전히 값 없이 "채워짐" 여부만 내려가야 한다.
+  assert.equal(publicSettings().image.apiKey, '');
+  saveSettings({
+    image: {
+      provider: DEFAULT_SETTINGS.image.provider,
+      chatgpt: { waitMs: DEFAULT_SETTINGS.image.chatgpt.waitMs },
+    },
+  });
 });
 
 test('countChars 는 공백을 빼고 센다', () => {

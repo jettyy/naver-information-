@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { getSettings } from '../lib/settings.js';
 import { logger } from '../lib/events.js';
 import { IMAGE_MODEL_FILE, ensureDirs } from '../lib/paths.js';
+import { generateViaChatGpt } from '../chatgpt/image.js';
 
 /**
  * 썸네일 이미지 생성.
@@ -674,14 +675,41 @@ function expectedLines(spec) {
 export async function maybeGenerateImage(spec, { signal, width, height, jobId = '' } = {}) {
   const { image } = getSettings();
   if (!image.enabled) return null;
+
+  const full = image.mode === 'full';
+  const aspectRatio = pickAspectRatio(width, height);
+  const what = full ? '썸네일' : '썸네일 배경 그림';
+
+  /*
+   * 구독 중인 ChatGPT 에서 받아오는 길.
+   *
+   * 여기서는 글자 검사를 돌리지 않는다. 검사는 구글 API 로 이미지를 한 번 더
+   * 읽어 보는 것이라 API 키가 있어야 하는데, ChatGPT 로 쓰는 사람은 키가
+   * 없는 경우가 대부분이다. 한글이 걱정되면 "배경만 그리기" 로 두면 된다.
+   */
+  if (image.provider === 'chatgpt') {
+    const prompt = full
+      ? buildPosterPrompt(spec, image.poster)
+      : buildImagePrompt(spec, image.style);
+    try {
+      const result = await generateViaChatGpt(prompt, { aspectRatio, jobId, signal });
+      logger.info(
+        `${what}을(를) ChatGPT 에서 받았습니다. (${Math.round(result.bytes / 1024)}KB)`,
+        { jobId },
+      );
+      return { ...result, mode: image.mode };
+    } catch (error) {
+      // 그림은 글의 부속물이다. 여기서 실패했다고 1,800자짜리 글을 버리지 않는다.
+      logger.warn(`ChatGPT 썸네일 실패, HTML 썸네일로 만듭니다: ${error.message}`, { jobId });
+      return null;
+    }
+  }
+
   if (!String(image.apiKey || '').trim()) {
     logger.warn('이미지 생성이 켜져 있지만 API 키가 없습니다. HTML 썸네일로 만듭니다.', { jobId });
     return null;
   }
 
-  const full = image.mode === 'full';
-  const aspectRatio = pickAspectRatio(width, height);
-  const what = full ? '썸네일' : '썸네일 배경 그림';
   const checking = full && image.verifyText;
 
   /**

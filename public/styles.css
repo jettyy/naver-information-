@@ -103,6 +103,11 @@ textarea:focus, input:focus, select:focus { outline: 2px solid #b8ecd0; border-c
 }
 .grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--muted); }
 .grid label.wide { grid-column: 1 / -1; }
+/* label 이 아닌 칸(ChatGPT 상자 등)도 한 줄을 다 쓰게 한다. */
+.grid > .wide { grid-column: 1 / -1; }
+.grid > .wide > .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+/* .grid label 의 display:flex 가 .hidden 을 이겨서, 숨기라고 해도 그대로 보였다. */
+.grid label.hidden, .grid .hidden { display: none; }
 .grid label.check { flex-direction: row; align-items: center; gap: 8px; flex-wrap: wrap; }
 .grid label.check input { width: auto; }
 .grid label.check .sub { flex-basis: 100%; }
@@ -343,3 +348,5 @@ td.src-cell { white-space: nowrap; }
   display: block; width: 100%; max-width: 560px; margin-top: 12px;
   border: 1px solid var(--line); border-radius: 10px;
 }
+/* .hidden 보다 뒤에 있어서 숨기라고 해도 깨진 그림이 그대로 보였다. */
+.image-preview.hidden { display: none; }

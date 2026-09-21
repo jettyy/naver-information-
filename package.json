@@ -10,7 +10,8 @@
     "dev": "node --watch src/server.js",
     "setup": "node scripts/setup.js",
     "check": "node scripts/check.js",
-    "check:editor": "node scripts/check-editor.js"
+    "check:editor": "node scripts/check-editor.js",
+    "check:chatgpt": "node scripts/check-chatgpt.js"
   },
   "engines": {
     "node": ">=20"

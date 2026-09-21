@@ -62,11 +62,21 @@ export const DEFAULT_SETTINGS = {
     blockOnFail: false,          // 끝내 못 고치면 저장하지 않고 실패로 둘지
   },
 
-  // 썸네일 이미지 생성 API
+  // 썸네일 이미지 생성
   image: {
-    enabled: false,              // 켜려면 API 키가 필요하다. 기본은 꺼짐.
-    provider: 'google',          // 현재는 구글(Gemini API)만
-    apiKey: '',                  // aistudio.google.com 에서 발급
+    enabled: false,              // 기본은 꺼짐 (HTML 썸네일).
+
+    // google  — Gemini 이미지 API. 장당 요금이 든다. API 키가 필요하다.
+    // chatgpt — **구독 중인 ChatGPT** 에서 그리게 하고 그림만 가져온다.
+    //           추가 요금이 없는 대신, 네이버처럼 브라우저로 한 번 로그인해 둬야 한다.
+    provider: 'google',
+    apiKey: '',                  // google 용. aistudio.google.com 에서 발급
+
+    // ChatGPT 에서 받아올 때의 설정
+    chatgpt: {
+      // 그림 한 장을 기다리는 시간. 몇 분 걸리는 일도 있어 넉넉히 잡는다.
+      waitMs: 300000,
+    },
 
     // full    — 글자까지 포함한 완성 썸네일을 API 가 통째로 그린다
     // overlay — 글자 없는 배경만 API 가 그리고 한글은 HTML 이 얹는다 (싸고 안전)

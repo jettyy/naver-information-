@@ -18,7 +18,7 @@ let state = {
   settings: null, session: null, jobs: [], runner: null,
   models: [], examples: [], rules: [],
   // 마지막으로 [미리 보기만] 으로 받아온 후보들. 목록에 넣기 전까지만 들고 있는다.
-  picks: [], history: null,
+  picks: [], history: null, chatgptSession: null,
   // 주문 대기열 (큰 주제 + 개수)
   requests: [],
 };
@@ -350,6 +350,9 @@ function renderSettings() {
   $('s-shot').checked = Boolean(s.run.screenshotOnError);
 
   $('s-image').checked = Boolean(s.image.enabled);
+  $('s-image-provider').value = s.image.provider || 'google';
+  $('s-chatgpt-wait').value = Math.round((s.image.chatgpt?.waitMs || 300000) / 1000);
+  renderImageProvider();
   $('s-image-mode').value = s.image.mode || 'full';
   $('s-image-poster').value = s.image.poster || 'bold';
   $('s-verify-text').checked = Boolean(s.image.verifyText);
@@ -403,6 +406,7 @@ function connectStream() {
     }
     else if (type === 'examples') { state.examples = payload; renderExamples(); }
     else if (type === 'session') { state.session = payload; renderSession(); }
+    else if (type === 'chatgptSession') { state.chatgptSession = payload; renderChatGptSession(); }
   };
   source.onerror = () => { /* EventSource 가 알아서 재접속한다. */ };
 }
@@ -422,10 +426,12 @@ async function refreshState() {
     examples: data.examples || [],
     history: data.history || state.history,
     requests: data.requests || [],
+    chatgptSession: data.chatgptSession || state.chatgptSession,
   };
   renderRules();
   renderSettings();
   renderSession();
+  renderChatGptSession();
   renderExamples();
   renderJobs();
   renderRunner();
@@ -472,6 +478,8 @@ function collectSettings() {
     },
     image: {
       enabled: $('s-image').checked,
+      provider: $('s-image-provider').value,
+      chatgpt: { waitMs: Math.max(30, Number($('s-chatgpt-wait').value) || 300) * 1000 },
       mode: $('s-image-mode').value,
       poster: $('s-image-poster').value,
       verifyText: $('s-verify-text').checked,
@@ -1106,11 +1114,30 @@ $('btn-test-ai').onclick = async () => {
 
 /* ---------- 썸네일 배경 그림 ---------- */
 
-for (const id of ['s-image', 's-image-mode', 's-image-poster', 's-verify-text', 's-image-model', 's-image-style']) {
+/* 구글 API 와 ChatGPT 는 필요한 것이 다르다. 고른 쪽 칸만 보여준다. */
+function renderImageProvider() {
+  const chatgpt = $('s-image-provider').value === 'chatgpt';
+  $('chatgpt-box').classList.toggle('hidden', !chatgpt);
+  // 구글에서만 쓰는 칸들. ChatGPT 를 고르면 눌러 봐야 소용이 없어 감춘다.
+  for (const id of ['s-image-key', 's-image-model', 's-verify-text', 'btn-test-image']) {
+    $(id).closest('label').classList.toggle('hidden', chatgpt);
+  }
+  $('image-test-result').classList.add('hidden');
+  $('image-test-preview').classList.add('hidden');
+}
+
+const IMAGE_IDS = [
+  's-image', 's-image-provider', 's-image-mode', 's-image-poster',
+  's-verify-text', 's-image-model', 's-image-style', 's-chatgpt-wait',
+];
+for (const id of IMAGE_IDS) {
   $(id).addEventListener('change', async () => {
+    renderImageProvider();
     await patchSettings({
       image: {
         enabled: $('s-image').checked,
+        provider: $('s-image-provider').value,
+        chatgpt: { waitMs: Math.max(30, Number($('s-chatgpt-wait').value) || 300) * 1000 },
         mode: $('s-image-mode').value,
         poster: $('s-image-poster').value,
         verifyText: $('s-verify-text').checked,
@@ -1118,8 +1145,10 @@ for (const id of ['s-image', 's-image-mode', 's-image-poster', 's-verify-text', 
         style: $('s-image-style').value,
       },
     });
+    if (id !== 's-image') return;
+    const where = $('s-image-provider').value === 'chatgpt' ? 'ChatGPT' : '구글 API';
     toast($('s-image').checked
-      ? '이미지 생성을 켰습니다. 키가 없으면 HTML 썸네일로 만듭니다.'
+      ? `썸네일을 ${where} 로 만듭니다. 실패하면 HTML 썸네일로 돌아갑니다.`
       : '이미지 생성을 껐습니다.');
   });
 }
@@ -1207,6 +1236,64 @@ async function runImageTest({ refresh = false } = {}) {
 
 $('btn-test-image').onclick = () => runImageTest();
 $('btn-refresh-models').onclick = () => runImageTest({ refresh: true });
+
+/* ---------- ChatGPT 에서 썸네일 받아오기 ---------- */
+
+function renderChatGptSession() {
+  const session = state.chatgptSession || {};
+  const el = $('chatgpt-state');
+  if (!el) return;
+  if (session.loggedIn) {
+    el.textContent = '로그인됨'
+      + (session.checkedAt ? ` · 마지막 확인 ${new Date(session.checkedAt).toLocaleString('ko-KR')}` : '')
+      + ' — 임시 채팅이 아니라 일반 대화에서 그립니다.';
+  } else {
+    el.textContent = 'ChatGPT 로그인이 필요합니다. [ChatGPT 로그인 창 열기]를 누르고 창에서 직접 로그인해 주세요.';
+  }
+}
+
+$('btn-chatgpt-login').onclick = async () => {
+  const data = await api('/api/chatgpt/login', { method: 'POST' });
+  toast(data.message);
+};
+
+$('btn-chatgpt-verify').onclick = async () => {
+  const data = await api('/api/chatgpt/verify', { method: 'POST' });
+  state.chatgptSession = data.chatgptSession;
+  renderChatGptSession();
+  toast(data.chatgptSession.loggedIn ? 'ChatGPT 세션이 살아 있습니다.' : 'ChatGPT 로그인이 필요합니다.');
+};
+
+$('btn-chatgpt-logout').onclick = async () => {
+  if (!confirm('저장된 ChatGPT 세션을 지울까요?')) return;
+  const data = await api('/api/chatgpt/logout', { method: 'POST' });
+  state.chatgptSession = data.chatgptSession;
+  renderChatGptSession();
+  toast('ChatGPT 세션을 삭제했습니다.');
+};
+
+$('btn-chatgpt-test').onclick = async () => {
+  const box = $('chatgpt-test-result');
+  const preview = $('chatgpt-test-preview');
+  const button = $('btn-chatgpt-test');
+  button.disabled = true;
+  preview.classList.add('hidden');
+  box.classList.remove('hidden', 'bad', 'good');
+  box.textContent = 'ChatGPT 에서 그림 한 장을 받는 중... (몇 분 걸릴 수 있습니다)';
+  try {
+    const data = await api('/api/chatgpt/test', { method: 'POST' });
+    if (data.ok === false) throw new Error(data.message);
+    box.classList.add('good');
+    box.textContent = data.message;
+    preview.src = data.url;
+    preview.classList.remove('hidden');
+  } catch (error) {
+    box.classList.add('bad');
+    box.textContent = `실패: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+};
 
 $('btn-preview-thumb').onclick = () => {
   const params = new URLSearchParams({

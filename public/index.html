@@ -297,9 +297,37 @@
         <label class="check"><input id="s-headless" type="checkbox"> 브라우저 창 숨기기<span class="sub">네이버는 창을 띄우는 편이 더 안전합니다</span></label>
         <label class="check"><input id="s-shot" type="checkbox"> 자동화 실패 시 화면 캡처<span class="sub">무엇이 막혔는지 볼 수 있는 유일한 단서입니다</span></label>
 
-        <label class="wide check"><input id="s-image" type="checkbox"> 썸네일을 이미지 API로 만들기
+        <label class="wide check"><input id="s-image" type="checkbox"> 썸네일을 AI 그림으로 만들기
           <span class="sub">끄면 지금까지처럼 HTML로 단색 썸네일을 만듭니다 (추가 비용 없음).
             어느 쪽이든 생성이 실패하면 HTML 썸네일로 자동으로 돌아갑니다</span></label>
+        <label class="wide">어디서 그릴지
+          <select id="s-image-provider">
+            <option value="google">구글 이미지 API — 장당 요금이 듭니다. API 키가 필요합니다</option>
+            <option value="chatgpt">구독 중인 ChatGPT — 추가 요금 없이 내 계정에서 그립니다</option>
+          </select>
+          <span class="sub">ChatGPT 를 고르면 <b>진짜 브라우저로 내 ChatGPT 에 들어가</b>
+            그림을 그리게 하고 그림만 가져옵니다. 네이버에 글을 올리는 것과 같은 방식이라
+            <b>아래에서 한 번 로그인</b>해 두시면 됩니다.
+            <b>임시 채팅이 아니라 일반 대화</b>에서 만들기 때문에 그림이 ChatGPT 대화 기록에
+            그대로 남습니다</span>
+        </label>
+
+        <div id="chatgpt-box" class="wide hidden">
+          <div class="row">
+            <button class="btn" id="btn-chatgpt-login" type="button">ChatGPT 로그인 창 열기</button>
+            <button class="btn ghost" id="btn-chatgpt-verify" type="button">세션 확인</button>
+            <button class="btn ghost" id="btn-chatgpt-test" type="button">썸네일 테스트 (한 장 받아보기)</button>
+            <button class="btn ghost danger" id="btn-chatgpt-logout" type="button">세션 삭제</button>
+          </div>
+          <span class="sub" id="chatgpt-state">로그인 상태를 확인하는 중...</span>
+          <div id="chatgpt-test-result" class="test-result hidden"></div>
+          <img id="chatgpt-test-preview" class="image-preview hidden" alt="ChatGPT 에서 받은 썸네일">
+          <label>한 장 기다리는 시간(초)
+            <input id="s-chatgpt-wait" type="number" min="30" max="900" step="10">
+            <span class="sub">그림 한 장에 몇 분 걸리는 일도 있습니다. 넉넉히 두세요</span>
+          </label>
+        </div>
+
         <label class="wide">만드는 방식
           <select id="s-image-mode">
             <option value="full">글자까지 통째로 그리기 — 포스터형 썸네일 (권장)</option>

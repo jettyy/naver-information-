@@ -16,6 +16,10 @@ import { parseTopics, normalizeBlogId } from './lib/util.js';
 import {
   openLoginWindow, verifySession, readSessionInfo, logout, closeContext,
 } from './naver/browser.js';
+import {
+  openChatGptLogin, verifyChatGptSession, readChatGptSession, chatGptLogout, closeChatGptContext,
+} from './chatgpt/browser.js';
+import { testChatGptImage } from './chatgpt/image.js';
 import { previewThumbnailHtml } from './content/thumbnail.js';
 import { checkClaude, runClaude } from './ai/claude.js';
 import { MODELS } from './ai/models.js';
@@ -60,6 +64,7 @@ app.get('/api/state', wrap(async (req, res) => {
     rules: RULE_SUMMARY,
     examples: listExamples(),
     session: readSessionInfo(),
+    chatgptSession: readChatGptSession(),
     jobs: listJobs(),
     requests: listRequests(),
     runner: runner.getRunnerState(),
@@ -131,6 +136,43 @@ app.post('/api/blog-id', wrap(async (req, res) => {
   saveSettings({ blogId });
   logger.info(`블로그 아이디를 ${blogId} 로 설정했습니다.`);
   res.json({ ok: true, settings: publicSettings(), session: readSessionInfo() });
+}));
+
+/* ---------- ChatGPT (썸네일을 구독 계정에서 받아오기) ---------- */
+
+/**
+ * 네이버 로그인과 똑같은 방식이다. 아이디·비밀번호는 다루지 않고
+ * 진짜 브라우저 창을 띄워 사용자가 직접 로그인하게 한 뒤 세션만 받는다.
+ */
+app.post('/api/chatgpt/login', wrap(async (req, res) => {
+  res.json({ ok: true, message: 'ChatGPT 로그인 창을 띄웁니다. 브라우저에서 직접 로그인해 주세요.' });
+  openChatGptLogin().catch((error) => logger.error(`ChatGPT 로그인 실패: ${error.message}`));
+}));
+
+app.post('/api/chatgpt/verify', wrap(async (req, res) => {
+  res.json({ ok: true, chatgptSession: await verifyChatGptSession() });
+}));
+
+app.post('/api/chatgpt/logout', wrap(async (req, res) => {
+  await chatGptLogout();
+  res.json({ ok: true, chatgptSession: readChatGptSession() });
+}));
+
+/** 진짜로 그림이 오는지 한 장 받아본다. 100건을 돌리기 전에 확인하는 용도다. */
+app.post('/api/chatgpt/test', wrap(async (req, res) => {
+  try {
+    const { fileName, bytes } = await testChatGptImage(THUMB_DIR);
+    logger.info(`ChatGPT 썸네일 테스트 성공 (${Math.round(bytes / 1024)}KB)`);
+    res.json({
+      ok: true,
+      fileName,
+      url: `/thumbnails/${encodeURIComponent(fileName)}`,
+      message: `그림 한 장을 받았습니다. (${Math.round(bytes / 1024)}KB)`,
+    });
+  } catch (error) {
+    logger.error(`ChatGPT 썸네일 테스트 실패: ${error.message}`);
+    res.json({ ok: false, message: error.message, screenshot: error.screenshot || '' });
+  }
 }));
 
 /* ---------- 주문 대기열 (큰 주제 + 개수) ---------- */
@@ -644,7 +686,7 @@ listen(PORT, PORT_RETRIES);
 async function shutdown() {
   logger.info('종료합니다...');
   runner.stop();
-  await Promise.allSettled([closeContext(), closeRenderBrowser()]);
+  await Promise.allSettled([closeContext(), closeChatGptContext(), closeRenderBrowser()]);
   server?.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
 }
