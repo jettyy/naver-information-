@@ -8,6 +8,7 @@ import {
   buildIntroHtml, buildBodyPlan, buildTableChunks, htmlToPlainText, BLOCK_GAP,
 } from '../content/naver.js';
 import { renderTableImages } from '../content/thumbnail.js';
+import { chooseCategory, normalizeName } from '../content/category.js';
 
 const MODIFIER = process.platform === 'darwin' ? 'Meta' : 'Control';
 
@@ -504,6 +505,102 @@ async function alignBodyLeft(page, scope, jobId) {
   }
 }
 
+/**
+ * 발행 패널을 열어 카테고리를 고르고, **발행하지 않고** 닫는다.
+ *
+ * 네이버는 카테고리를 발행 패널 안에만 두었다. 그래서 여기를 한 번 열어야 한다.
+ * 이 프로그램에서 가장 조심해야 할 곳이다. 패널 안에는 진짜 [발행] 버튼이 있고,
+ * 그걸 잘못 누르면 **검토 안 한 글이 그대로 공개된다.**
+ *
+ * 그래서 규칙을 좁게 잡았다.
+ *   - 패널을 여는 버튼은 헤더의 것만 (SELECTORS.publishPanelOpen)
+ *   - 패널 안에서는 카테고리 드롭다운과 그 목록만 건드린다
+ *   - 닫을 때는 Esc 와 닫기 버튼만 쓴다
+ *   - 끝나고 **글쓰기 화면에 그대로 있는지 주소로 확인**한다.
+ *     발행돼서 화면이 넘어갔으면 그 자리에서 실패로 던진다
+ *
+ * 실패해도 글을 버리지 않는다. 카테고리는 나중에 사람이 고를 수 있다.
+ *
+ * @returns {Promise<{name: string, how: string}>} 못 고르면 name 이 빈 값
+ */
+async function applyCategory(page, scope, post, jobId) {
+  const settings = getSettings();
+  const wanted = String(settings.post.category || '').trim();
+  const before = page.url();
+
+  let opened = false;
+  try {
+    // 1) 패널 열기. 헤더의 버튼만 후보에 들어 있다.
+    const { locator } = await findFirst(scope, SELECTORS.publishPanelOpen, 8000);
+    await locator.click({ timeout: 8000 });
+    opened = true;
+    await page.waitForTimeout(1200);
+
+    // 2) 카테고리 드롭다운 펼치기
+    const { locator: dropdown } = await findFirst(scope, SELECTORS.categoryOpen, 6000);
+    await dropdown.click({ timeout: 6000 });
+    await page.waitForTimeout(600);
+
+    // 3) 있는 카테고리 이름을 읽는다
+    let items = null;
+    for (const selector of SELECTORS.categoryItem) {
+      const all = scope.locator(selector);
+      if (await all.count()) { items = all; break; }
+    }
+    if (!items) throw new Error('카테고리 목록을 찾지 못했습니다.');
+
+    const names = (await items.allInnerTexts())
+      .map((text) => text.replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    if (!names.length) throw new Error('카테고리가 하나도 없습니다.');
+    logger.info(`블로그 카테고리 ${names.length}개를 읽었습니다: ${names.slice(0, 8).join(', ')}`, { jobId });
+
+    // 4) 어디에 넣을지 정한다. 설정에 고정값이 있으면 그것을 우선한다.
+    let choice = { name: '', why: '', how: '' };
+    if (wanted) {
+      const exact = names.find((name) => normalizeName(name) === normalizeName(wanted));
+      if (exact) choice = { name: exact, why: '설정에 지정된 카테고리입니다.', how: '설정 고정' };
+      else logger.warn(`설정한 카테고리 "${wanted}" 가 블로그에 없습니다. 알아서 고릅니다.`, { jobId });
+    }
+    if (!choice.name) choice = await chooseCategory(names, post, { signal: undefined });
+    if (!choice.name) throw new Error('맞는 카테고리를 고르지 못했습니다.');
+
+    // 5) 그 이름을 누른다
+    const index = names.findIndex((name) => name === choice.name);
+    await items.nth(index).click({ timeout: 6000 });
+    await page.waitForTimeout(600);
+    logger.info(`카테고리를 "${choice.name}" 로 골랐습니다. (${choice.how})`, { jobId });
+    return { name: choice.name, how: choice.how };
+  } catch (error) {
+    logger.warn(`카테고리를 고르지 못했습니다: ${error.message.split('\n')[0]}`, { jobId });
+    return { name: '', how: '' };
+  } finally {
+    /*
+     * 무슨 일이 있어도 패널을 닫는다. 열어 둔 채로 저장하면 저장 버튼이
+     * 패널에 가려 안 눌린다. 닫을 때도 발행 버튼은 건드리지 않는다.
+     */
+    if (opened) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(400);
+      await clickIfPresent(scope, SELECTORS.publishPanelClose, 1500);
+      await page.waitForTimeout(400);
+    }
+
+    /*
+     * 마지막 확인. 발행 패널을 다뤘으니 **정말로 발행되지 않았는지** 본다.
+     * 글쓰기 주소를 벗어났다면 발행됐다는 뜻이다. 조용히 넘어가면 안 된다.
+     */
+    const after = page.url();
+    if (!page.isClosed() && /postwrite|PostWriteForm|Redirect=Write/i.test(before)
+        && !/postwrite|PostWriteForm|Redirect=Write/i.test(after)) {
+      throw new Error(
+        `카테고리를 고르는 중에 글이 발행된 것 같습니다. (${before} → ${after}) `
+        + '네이버에서 확인하고 필요하면 내려주세요. 카테고리 자동 선택을 꺼 주세요.',
+      );
+    }
+  }
+}
+
 async function saveDraft(page, scope) {
   const { locator, selector } = await findFirst(scope, SELECTORS.saveButton, 15000);
   await locator.click({ timeout: 10000 });
@@ -682,6 +779,15 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
       }
     }
 
+    /*
+     * 카테고리 고르기. 썸네일까지 다 넣은 **맨 마지막**에 한다.
+     * 발행 패널을 여닫는 동작이라 본문 작업과 섞이면 안 된다.
+     */
+    let category = { name: '', how: '' };
+    if (settings.post.autoCategory) {
+      category = await applyCategory(page, scope, post, jobId);
+    }
+
     // 썸네일을 넣다가 본문이 상했는지 마지막으로 확인한다.
     const beforeSave = await bodyTextLength(scope);
     if (beforeSave < afterAlign * 0.9) {
@@ -697,6 +803,7 @@ export async function publishDraft({ post, thumbnailPath, jobId = '', bodyOption
       confirmed,
       blogId,
       thumbnailInserted,
+      category: category.name,
       tables,
       // 임시저장 목록은 글쓰기 화면에서 열린다. 대시보드의 [임시저장 열기] 링크.
       draftListUrl: `https://blog.naver.com/${blogId}/postwrite`,

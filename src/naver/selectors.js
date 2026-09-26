@@ -84,6 +84,52 @@ export const SELECTORS = {
     'a[title="글쓰기"]',
   ],
 
+  /*
+   * ---------- 카테고리 ----------
+   *
+   * 네이버는 카테고리를 **[발행] 패널 안에만** 두었다. 그래서 카테고리를
+   * 고르려면 그 패널을 한 번 열어야 한다. 위험한 곳이라 규칙을 못 박는다.
+   *
+   *   - 패널을 여는 버튼(헤더의 "발행")만 누른다
+   *   - 패널 **안**의 발행 버튼은 절대 누르지 않는다. 그건 진짜 발행이다
+   *   - 카테고리를 고른 뒤에는 Esc 나 닫기 버튼으로 패널을 닫는다
+   *
+   * 이 목록에 패널 안의 확정 발행 버튼을 넣지 않는 것이 유일한 안전장치다.
+   * 후보를 늘릴 때 반드시 확인하고 넣어야 한다.
+   */
+
+  // 발행 패널을 여는 버튼. **헤더에 있는 것만** 잡는다.
+  publishPanelOpen: [
+    '.header button:text-is("발행")',
+    'header button:text-is("발행")',
+    'button[data-click-area="tpb.publish"]',
+    'button.publish_btn__m9KHH',
+  ],
+
+  // 패널 안의 카테고리 선택 드롭다운
+  categoryOpen: [
+    'button.selectbox_button__jb1Dt',
+    '[class*="category"] button[class*="selectbox"]',
+    'button[aria-label*="카테고리"]',
+    '.option_category button',
+  ],
+
+  // 펼쳐진 목록의 항목들 (이름으로 골라 누른다)
+  categoryItem: [
+    'ul.selectbox_list__QamsG li button',
+    '[class*="selectbox_list"] li button',
+    '[class*="category"] li button',
+    '[role="listbox"] [role="option"]',
+  ],
+
+  // 발행하지 않고 패널을 닫는 버튼
+  publishPanelClose: [
+    'button.btn_close__Y6_Y8',
+    '[class*="layer"] button[class*="close"]',
+    'button[aria-label="닫기"]',
+    '[class*="publish"] button[aria-label*="닫기"]',
+  ],
+
   // 처음 진입 시 뜨는 도움말 패널 닫기
   helpPanelClose: [
     '.se-help-panel-close-button',

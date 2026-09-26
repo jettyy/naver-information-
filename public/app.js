@@ -345,6 +345,8 @@ function renderSettings() {
   $('s-thumb-w').value = s.thumbnail.width;
   $('s-thumb-h').value = s.thumbnail.height;
   $('s-thumb-insert').checked = Boolean(s.thumbnail.insert);
+  $('s-auto-category').checked = Boolean(s.post.autoCategory);
+  if (document.activeElement !== $('s-category')) $('s-category').value = s.post.category || '';
   $('s-thumb-emoji').checked = Boolean(s.thumbnail.emoji);
   $('s-headless').checked = Boolean(s.run.headless);
   $('s-shot').checked = Boolean(s.run.screenshotOnError);
@@ -463,6 +465,8 @@ function collectSettings() {
       addCriteria: $('s-criteria').checked,
       addFaq: $('s-faq').checked,
       appendTags: $('s-tags').checked,
+      autoCategory: $('s-auto-category').checked,
+      category: $('s-category').value.trim(),
     },
     quality: {
       enforce: $('s-enforce').checked,
@@ -1081,6 +1085,22 @@ $('s-model-custom').addEventListener('change', async () => {
   await patchSettings({ claude: { model: $('s-model-custom').value.trim() } });
   toast('모델을 저장했습니다.');
 });
+
+/* 카테고리 설정은 누르는 즉시 저장한다. [설정 저장] 을 또 누르게 하지 않는다. */
+for (const id of ['s-auto-category', 's-category']) {
+  $(id).addEventListener('change', async () => {
+    await patchSettings({
+      post: {
+        autoCategory: $('s-auto-category').checked,
+        category: $('s-category').value.trim(),
+      },
+    });
+    if (id !== 's-auto-category') return;
+    toast($('s-auto-category').checked
+      ? '글에 맞는 카테고리를 알아서 고릅니다.'
+      : '카테고리를 고르지 않습니다. 발행할 때 직접 선택하세요.');
+  });
+}
 
 $('btn-save-settings').onclick = async () => {
   await patchSettings(collectSettings());

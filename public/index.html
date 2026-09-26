@@ -293,6 +293,15 @@
         <label>썸네일 가로(px)<input id="s-thumb-w" type="number" min="600" max="2000" step="10"></label>
         <label>썸네일 세로(px)<input id="s-thumb-h" type="number" min="400" max="2000" step="10"></label>
         <label class="check"><input id="s-thumb-insert" type="checkbox"> 썸네일을 본문 안에 넣기</label>
+        <label class="wide check"><input id="s-auto-category" type="checkbox"> 카테고리를 알아서 고르기
+          <span class="sub">블로그에 <b>이미 있는 카테고리 중에서</b> 글에 맞는 것을 골라 넣습니다.
+            네이버는 카테고리가 발행 패널 안에 있어서 그 패널을 잠깐 열었다 닫습니다.
+            <b>발행 버튼은 건드리지 않고</b>, 끝나고 정말 발행되지 않았는지 주소로 확인합니다</span></label>
+        <label class="wide">늘 쓸 카테고리 (선택)
+          <input id="s-category" type="text" placeholder="비우면 글마다 알아서 고릅니다">
+          <span class="sub">이름을 적으면 모든 글을 그 카테고리로 넣습니다.
+            블로그에 없는 이름이면 무시하고 알아서 고릅니다</span>
+        </label>
         <label class="check"><input id="s-thumb-emoji" type="checkbox"> 썸네일에 이모지 허용<span class="sub">정보성 글에서는 꺼두는 편이 안전합니다</span></label>
         <label class="check"><input id="s-headless" type="checkbox"> 브라우저 창 숨기기<span class="sub">네이버는 창을 띄우는 편이 더 안전합니다</span></label>
         <label class="check"><input id="s-shot" type="checkbox"> 자동화 실패 시 화면 캡처<span class="sub">무엇이 막혔는지 볼 수 있는 유일한 단서입니다</span></label>

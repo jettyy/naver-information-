@@ -216,18 +216,24 @@ async function processJob(job) {
   const thumbNote = thumb.filePath && getSettings().thumbnail.insert && !result.thumbnailInserted
     ? ' · 썸네일 없이 저장됨'
     : '';
+  // 어느 카테고리로 들어갔는지 그대로 알린다. 못 골랐으면 조용히 넘어가지 않는다.
+  const categoryNote = getSettings().post.autoCategory
+    ? (result.category ? ` · 카테고리 ${result.category}` : ' · 카테고리 못 고름')
+    : '';
   updateJob(job.id, {
     status: STATUS.DONE,
     message: (compliance?.ok
       ? `${saveNote} (품질 검사 통과)`
-      : `${saveNote} (${summarize(compliance)})`) + thumbNote,
+      : `${saveNote} (${summarize(compliance)})`) + thumbNote + categoryNote,
     thumbnailInserted: result.thumbnailInserted !== false,
+    category: result.category || '',
     archiveDir: path.basename(dir),
     editUrl: result.draftListUrl || '',
     confirmed: result.confirmed,
   });
   logger.info(
-    `[${job.topic}] ${saveNote}${thumbNote}. 네이버 글쓰기 화면의 [저장] 목록에서 확인하세요 `
+    `[${job.topic}] ${saveNote}${thumbNote}${categoryNote}. `
+    + '네이버 글쓰기 화면의 [저장] 목록에서 확인하세요 '
     + `→ ${result.draftListUrl}`,
     { jobId: job.id },
   );

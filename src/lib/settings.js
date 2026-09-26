@@ -26,6 +26,13 @@ export const DEFAULT_SETTINGS = {
     addCriteria: true,           // 서두에 '선정 기준' 밝히기 (필수 규칙)
     addFaq: true,                // 마지막에 자주 묻는 질문 (정보성 강화)
     appendTags: true,            // 글 끝에 #태그 줄을 붙일지 (네이버 검색 유입)
+
+    // 글에 맞는 카테고리를 **블로그에 이미 있는 것 중에서** 알아서 고른다.
+    // 네이버는 카테고리를 발행 패널 안에 두어서, 고르려면 그 패널을 한 번
+    // 열었다 닫아야 한다. 발행 버튼은 건드리지 않는다. (editor.js applyCategory)
+    autoCategory: true,
+    // 여기에 이름을 적으면 **늘 그 카테고리**로 넣는다. 비우면 알아서 고른다.
+    category: '',
   },
 
   // 주제 발굴 (큰 주제 → 웹 검색 → 글 주제)

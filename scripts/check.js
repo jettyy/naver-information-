@@ -22,6 +22,9 @@ import {
 import { buildMarkdown } from '../src/content/markdown.js';
 import { normalize, fixedTitleBlock } from '../src/content/generator.js';
 import { isTemporaryUrl, looksLikeGeneratedImage } from '../src/chatgpt/selectors.js';
+import {
+  pickByKeyword, scoreCategory, buildCategoryPrompt, normalizeName,
+} from '../src/content/category.js';
 import { DEFAULT_SETTINGS, saveSettings, getSettings, publicSettings } from '../src/lib/settings.js';
 import { detectShape, compactRanking } from '../src/content/ranking.js';
 import {
@@ -1228,6 +1231,66 @@ test('썸네일을 어디서 그릴지 설정이 대시보드로 내려간다', 
       chatgpt: { waitMs: DEFAULT_SETTINGS.image.chatgpt.waitMs },
     },
   });
+});
+
+test('글에 맞는 카테고리를 이름만 보고도 고른다', () => {
+  // 대부분 여기서 끝난다. AI 를 부르지 않으니 공짜고 즉시 끝난다.
+  const list = ['일상', '교육·입시', '재테크', 'IT·전자기기', '맛집'];
+
+  assert.equal(pickByKeyword(list, {
+    title: '2026년 수도권 대학 순위 TOP 50 총정리',
+    tags: ['대학순위', '입시'],
+  }).name, '교육·입시');
+
+  assert.equal(pickByKeyword(list, {
+    title: '연말정산 환급 많이 받는 방법',
+    tags: ['재테크', '절세'],
+  }).name, '재테크');
+
+  assert.equal(pickByKeyword(list, {
+    title: '갤럭시 신제품 비교',
+    tags: ['IT', '스마트폰'],
+  }).name, 'IT·전자기기');
+});
+
+test('겹치는 이름이 없으면 억지로 고르지 않는다', () => {
+  // 여기서 아무거나 집으면 엉뚱한 카테고리에 글이 쌓인다. 그때는 AI 에게 묻는다.
+  const { name, score } = pickByKeyword(['맛집', '여행'], {
+    title: '국민연금 수령 나이 총정리',
+    tags: ['연금'],
+  });
+  assert.equal(name, '', `"${name}" 을 골랐습니다 (점수 ${score})`);
+});
+
+test('카테고리 이름 비교는 공백과 기호를 무시한다', () => {
+  // "교육 · 입시" 와 "교육·입시" 를 다른 것으로 보면 AI 가 고른 이름을 못 누른다.
+  assert.equal(normalizeName('교육 · 입시'), normalizeName('교육·입시'));
+  assert.equal(normalizeName('IT / 전자기기'), normalizeName('it전자기기'));
+});
+
+test('카테고리 점수는 제목에 그대로 든 이름을 가장 높게 본다', () => {
+  const inTitle = scoreCategory('자격증', { title: '국가자격증 총정리', tags: [] });
+  const inTag = scoreCategory('자격증', { title: '무관한 제목', tags: ['자격증'] });
+  const nothing = scoreCategory('맛집', { title: '무관한 제목', tags: ['연금'] });
+  assert.ok(inTitle > inTag, '제목이 태그보다 약합니다');
+  assert.ok(inTag > nothing, '태그가 무관한 것과 같습니다');
+  assert.equal(nothing, 0);
+});
+
+test('카테고리 프롬프트는 목록 밖을 못 고르게 막는다', () => {
+  const prompt = buildCategoryPrompt(['교육', '재테크'], { title: '대학 순위', tags: [] });
+  assert.ok(prompt.includes('교육'), '목록이 안 들어갔습니다');
+  assert.ok(prompt.includes('목록 밖의 이름을 쓰면 안 됩니다'), '목록 밖 금지 지시가 없습니다');
+  assert.ok(prompt.includes('새 카테고리를 만들거나'), '새로 만들지 말라는 지시가 없습니다');
+  // "없음" 을 답으로 주면 카테고리가 안 잡힌다. 반드시 하나는 고르게 한다.
+  assert.ok(prompt.includes('"없음" 은 답이 아닙니다'), '반드시 고르라는 지시가 없습니다');
+});
+
+test('카테고리 설정이 대시보드로 내려간다', () => {
+  const saved = saveSettings({ post: { autoCategory: true, category: '교육' } });
+  assert.equal(saved.post.autoCategory, true);
+  assert.equal(publicSettings().post.category, '교육');
+  saveSettings({ post: { autoCategory: DEFAULT_SETTINGS.post.autoCategory, category: '' } });
 });
 
 test('countChars 는 공백을 빼고 센다', () => {
