@@ -313,6 +313,7 @@
           <select id="s-image-provider">
             <option value="google">구글 이미지 API — 장당 요금이 듭니다. API 키가 필요합니다</option>
             <option value="chatgpt">구독 중인 ChatGPT — 추가 요금 없이 내 계정에서 그립니다</option>
+            <option value="pexels">Pexels 무료 사진 — 공짜, 찍혀 있는 사진을 배경으로</option>
           </select>
           <span class="sub">ChatGPT 를 고르면 <b>진짜 브라우저로 내 ChatGPT 에 들어가</b>
             그림을 그리게 하고 그림만 가져옵니다. 네이버에 글을 올리는 것과 같은 방식이라
@@ -320,6 +321,22 @@
             <b>임시 채팅이 아니라 일반 대화</b>에서 만들기 때문에 그림이 ChatGPT 대화 기록에
             그대로 남습니다</span>
         </label>
+
+        <div id="pexels-box" class="wide hidden">
+          <p class="note tight"><b>Pexels 는 그림을 그리는 게 아니라 이미 찍혀 있는 사진을 가져옵니다.</b>
+            그래서 글자를 그릴 수 없어 <b>늘 배경으로만</b> 쓰고, 제목은 HTML 이 위에 얹습니다.
+            덕분에 <b>한글이 깨질 일이 아예 없습니다.</b>
+            무료이고(시간당 200장) 브라우저를 띄우지 않아 가장 빠릅니다.</p>
+          <label>Pexels API 키
+            <input id="s-pexels-key" type="password" placeholder="563492ad..." autocomplete="new-password">
+            <span class="sub" id="pexels-key-state">pexels.com/api 에서 무료로 발급됩니다</span>
+          </label>
+          <div class="row">
+            <button class="btn" id="btn-test-pexels" type="button">Pexels 테스트 (한 장 받아보기)</button>
+          </div>
+          <div id="pexels-test-result" class="test-result hidden"></div>
+          <img id="pexels-test-preview" class="image-preview hidden" alt="Pexels 에서 받은 사진">
+        </div>
 
         <div id="chatgpt-box" class="wide hidden">
           <div class="row">

@@ -25,6 +25,7 @@ import { isTemporaryUrl, looksLikeGeneratedImage } from '../src/chatgpt/selector
 import {
   pickByKeyword, scoreCategory, buildCategoryPrompt, normalizeName,
 } from '../src/content/category.js';
+import { buildPexelsQuery, pickPhoto, pickPhotoUrl } from '../src/content/pexels.js';
 import { DEFAULT_SETTINGS, saveSettings, getSettings, publicSettings } from '../src/lib/settings.js';
 import { detectShape, compactRanking } from '../src/content/ranking.js';
 import {
@@ -1291,6 +1292,65 @@ test('카테고리 설정이 대시보드로 내려간다', () => {
   assert.equal(saved.post.autoCategory, true);
   assert.equal(publicSettings().post.category, '교육');
   saveSettings({ post: { autoCategory: DEFAULT_SETTINGS.post.autoCategory, category: '' } });
+});
+
+test('Pexels 검색어를 영어 낱말로 줄인다', () => {
+  // scene 은 이미 영어 한 문장이다. Pexels 는 긴 문장보다 낱말 몇 개를 잘 찾는다.
+  const query = buildPexelsQuery({
+    scene: 'students in a bright technical college workshop with machines and computers',
+  });
+  assert.ok(query.includes('students'), `낱말이 빠졌습니다: ${query}`);
+  assert.ok(!query.includes('with'), `쓸모없는 말이 남았습니다: ${query}`);
+  assert.ok(query.split(' ').length <= 5, `너무 깁니다: ${query}`);
+});
+
+test('scene 이 없거나 한글뿐이면 무난한 검색어로 간다', () => {
+  // 한글로 찾으면 Pexels 는 결과를 거의 못 준다. 빈손보다 무난한 사진이 낫다.
+  for (const scene of ['', '밝은 사무실 책상', undefined]) {
+    const query = buildPexelsQuery({ scene });
+    assert.ok(/[a-z]/.test(query), `영어가 아닙니다: ${query}`);
+    assert.ok(query.length > 5, `너무 짧습니다: ${query}`);
+  }
+});
+
+test('썸네일 비율에 가까운 가로 사진을 고른다', () => {
+  const json = {
+    photos: [
+      { id: 1, width: 800, height: 1200, src: { landscape: 'tall' } },    // 세로 — 제외
+      { id: 2, width: 400, height: 300, src: { landscape: 'small' } },    // 작음 — 제외
+      { id: 3, width: 1920, height: 1920, src: { landscape: 'square' } }, // 정사각 — 멀다
+      { id: 4, width: 1920, height: 1000, src: { landscape: 'wide' } },   // 딱 맞다
+    ],
+  };
+  const picked = pickPhoto(json, 1200 / 630);
+  assert.equal(picked.id, 4, `${picked?.id} 번을 골랐습니다`);
+});
+
+test('쓸 만한 사진이 없으면 첫 장이라도 쓴다', () => {
+  // 여기서 빈손으로 돌아가면 HTML 썸네일로 물러선다. 사진이 있으면 쓰는 편이 낫다.
+  const json = { photos: [{ id: 9, width: 300, height: 900, src: { medium: 'only' } }] };
+  assert.equal(pickPhoto(json)?.id, 9);
+  assert.equal(pickPhoto({ photos: [] }), null);
+  assert.equal(pickPhoto({}), null);
+});
+
+test('사진 주소는 큰 것부터 고른다', () => {
+  assert.equal(pickPhotoUrl({ src: { landscape: 'L', medium: 'M' } }), 'L');
+  assert.equal(pickPhotoUrl({ src: { medium: 'M' } }), 'M');
+  assert.equal(pickPhotoUrl({}), '');
+});
+
+test('Pexels 키는 대시보드로 값이 안 내려간다', () => {
+  // 화면에는 "채워졌는지" 만 알려주고 값은 서버에만 둔다.
+  saveSettings({ image: { pexels: { apiKey: 'pexels-secret-key' } } });
+  const pub = publicSettings();
+  assert.equal(pub.image.pexels.apiKey, '', '키가 그대로 내려갔습니다');
+  assert.equal(pub.image.pexels.apiKeySet, true, '채워짐 표시가 없습니다');
+
+  // 화면에서 되돌아온 마스킹 값으로 진짜 키를 덮어쓰면 안 된다.
+  const after = saveSettings({ image: { pexels: { apiKey: '●●●●●' } } });
+  assert.equal(after.image.pexels.apiKey, 'pexels-secret-key', '마스킹 값이 키를 덮었습니다');
+  saveSettings({ image: { pexels: { apiKey: '' } } });
 });
 
 test('countChars 는 공백을 빼고 센다', () => {

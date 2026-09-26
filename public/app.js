@@ -361,6 +361,9 @@ function renderSettings() {
   // 비어 있으면 자동. placeholder 가 그렇게 안내한다.
   $('s-image-model').value = s.image.model || '';
   $('s-image-style').value = s.image.style || 'flat';
+  $('pexels-key-state').textContent = s.image.pexels?.apiKeySet
+    ? '저장된 키가 있습니다. 바꿀 때만 새로 입력하세요.'
+    : 'pexels.com/api 에서 무료로 발급됩니다';
   $('image-key-state').textContent = s.image.apiKeySet
     ? '저장된 키가 있습니다. 바꿀 때만 새로 입력하세요.'
     : 'aistudio.google.com 에서 무료로 발급됩니다';
@@ -1136,12 +1139,26 @@ $('btn-test-ai').onclick = async () => {
 
 /* 구글 API 와 ChatGPT 는 필요한 것이 다르다. 고른 쪽 칸만 보여준다. */
 function renderImageProvider() {
-  const chatgpt = $('s-image-provider').value === 'chatgpt';
+  const provider = $('s-image-provider').value;
+  const chatgpt = provider === 'chatgpt';
+  const pexels = provider === 'pexels';
+  const google = provider === 'google';
+
   $('chatgpt-box').classList.toggle('hidden', !chatgpt);
-  // 구글에서만 쓰는 칸들. ChatGPT 를 고르면 눌러 봐야 소용이 없어 감춘다.
+  $('pexels-box').classList.toggle('hidden', !pexels);
+
+  // 구글에서만 쓰는 칸들. 다른 곳을 고르면 눌러 봐야 소용이 없어 감춘다.
   for (const id of ['s-image-key', 's-image-model', 's-verify-text', 'btn-test-image']) {
-    $(id).closest('label').classList.toggle('hidden', chatgpt);
+    $(id).closest('label').classList.toggle('hidden', !google);
   }
+  /*
+   * Pexels 는 찍혀 있는 사진이라 "통째로 그리기" 와 "포스터 분위기" 가 의미가 없다.
+   * 늘 배경으로만 쓰므로 그 칸들을 감춘다.
+   */
+  for (const id of ['s-image-mode', 's-image-poster']) {
+    $(id).closest('label').classList.toggle('hidden', pexels);
+  }
+
   $('image-test-result').classList.add('hidden');
   $('image-test-preview').classList.add('hidden');
 }
@@ -1253,6 +1270,48 @@ async function runImageTest({ refresh = false } = {}) {
     refreshButton.disabled = false;
   }
 }
+
+/* Pexels 는 키를 넣는 즉시 저장한다. 테스트 버튼으로 한 번에 확인하게. */
+$('s-pexels-key').addEventListener('change', async () => {
+  const apiKey = $('s-pexels-key').value.trim();
+  if (!apiKey) return;
+  await patchSettings({ image: { pexels: { apiKey } } });
+  $('s-pexels-key').value = '';
+  toast('Pexels 키를 저장했습니다.');
+});
+
+$('btn-test-pexels').onclick = async () => {
+  const box = $('pexels-test-result');
+  const preview = $('pexels-test-preview');
+  const button = $('btn-test-pexels');
+  button.disabled = true;
+  preview.classList.add('hidden');
+  box.classList.remove('hidden', 'bad', 'good');
+  box.textContent = 'Pexels 에서 사진 한 장을 받는 중...';
+  try {
+    const data = await api('/api/pexels/test', {
+      method: 'POST',
+      body: { apiKey: $('s-pexels-key').value.trim() },
+    });
+    state.settings = data.settings || state.settings;
+    $('s-pexels-key').value = '';
+    renderSettings();
+    if (data.failed) {
+      box.classList.add('bad');
+      box.textContent = `실패: ${data.message}`;
+    } else {
+      box.classList.add('good');
+      box.textContent = data.message;
+      preview.src = data.url;
+      preview.classList.remove('hidden');
+    }
+  } catch (error) {
+    box.classList.add('bad');
+    box.textContent = `실패: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+};
 
 $('btn-test-image').onclick = () => runImageTest();
 $('btn-refresh-models').onclick = () => runImageTest({ refresh: true });

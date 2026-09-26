@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import { PUBLIC_DIR, THUMB_DIR, OUTPUT_DIR, SHOT_DIR, ensureDirs } from './lib/paths.js';
 import {
@@ -21,6 +23,7 @@ import {
 } from './chatgpt/browser.js';
 import { testChatGptImage } from './chatgpt/image.js';
 import { previewThumbnailHtml } from './content/thumbnail.js';
+import { fetchPexelsPhoto } from './content/pexels.js';
 import { checkClaude, runClaude } from './ai/claude.js';
 import { MODELS } from './ai/models.js';
 import { RULES } from './content/quality.js';
@@ -452,6 +455,37 @@ app.post('/api/research/test', wrap(async (req, res) => {
  * 이미지 API 키가 실제로 되는지 한 장 뽑아 본다.
  * 그림을 화면에 바로 띄워서 품질까지 눈으로 확인할 수 있게 한다.
  */
+/** Pexels 키가 맞는지, 진짜로 사진이 오는지 한 장 받아본다. */
+app.post('/api/pexels/test', wrap(async (req, res) => {
+  const apiKey = String(req.body?.apiKey || '').trim();
+  if (apiKey) saveSettings({ image: { pexels: { apiKey } } });
+
+  const settings = getSettings();
+  try {
+    const photo = await fetchPexelsPhoto(
+      { scene: 'a bright modern office desk with a notebook and coffee' },
+      { width: settings.thumbnail.width, height: settings.thumbnail.height },
+    );
+    const match = /^data:image\/([a-z0-9+.-]+);base64,(.+)$/i.exec(photo.dataUri);
+    if (!match) throw new Error('받은 사진을 읽지 못했습니다.');
+    const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+    const fileName = `pexels-test-${Date.now()}.${ext}`;
+    fs.writeFileSync(path.join(THUMB_DIR, fileName), Buffer.from(match[2], 'base64'));
+
+    logger.info(`Pexels 테스트 성공 (${Math.round(photo.bytes / 1024)}KB)`);
+    res.json({
+      ok: true,
+      settings: publicSettings(),
+      url: `/thumbnails/${encodeURIComponent(fileName)}`,
+      message: `사진 한 장을 받았습니다. ("${photo.query}"`
+        + `${photo.credit ? ` · ${photo.credit}` : ''} · ${Math.round(photo.bytes / 1024)}KB)`,
+    });
+  } catch (error) {
+    logger.error(`Pexels 테스트 실패: ${error.message}`);
+    res.json({ ok: true, failed: true, settings: publicSettings(), message: error.message });
+  }
+}));
+
 app.post('/api/image/test', wrap(async (req, res) => {
   const settings = getSettings();
   const apiKey = String(req.body?.apiKey || '').trim();

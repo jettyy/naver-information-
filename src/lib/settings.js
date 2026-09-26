@@ -76,8 +76,16 @@ export const DEFAULT_SETTINGS = {
     // google  — Gemini 이미지 API. 장당 요금이 든다. API 키가 필요하다.
     // chatgpt — **구독 중인 ChatGPT** 에서 그리게 하고 그림만 가져온다.
     //           추가 요금이 없는 대신, 네이버처럼 브라우저로 한 번 로그인해 둬야 한다.
+    // pexels  — 무료 사진 사이트에서 **찍혀 있는 사진**을 받아온다.
+    //           공짜이고 빠르지만 글자는 못 그린다. 그래서 늘 배경으로만 쓰고
+    //           제목은 HTML 이 위에 얹는다 (한글이 깨질 일이 없다).
     provider: 'google',
     apiKey: '',                  // google 용. aistudio.google.com 에서 발급
+
+    // Pexels (무료 사진)
+    pexels: {
+      apiKey: '',                // pexels.com/api 에서 무료로 발급
+    },
 
     // ChatGPT 에서 받아올 때의 설정
     chatgpt: {
@@ -135,7 +143,10 @@ export const DEFAULT_SETTINGS = {
 };
 
 /** 대시보드로 내보내면 안 되는 값. 화면에는 채워졌는지만 알려준다. */
-const SECRET_PATHS = [['image', 'apiKey']];
+const SECRET_PATHS = [
+  ['image', 'apiKey'],
+  ['image', 'pexels', 'apiKey'],
+];
 
 function deepMerge(base, patch) {
   if (patch === null || patch === undefined) return base;
@@ -166,9 +177,13 @@ export function getSettings() {
 export function saveSettings(patch) {
   const clean = structuredClone(patch || {});
   // 화면에서 되돌아온 마스킹 값(●●●●)으로 진짜 키를 덮어쓰지 않는다.
-  for (const [group, key] of SECRET_PATHS) {
-    const value = clean?.[group]?.[key];
-    if (typeof value === 'string' && /^[●•*]+$/.test(value.trim())) delete clean[group][key];
+  for (const keys of SECRET_PATHS) {
+    // 마지막 한 칸 앞까지 따라 들어간다. (image.pexels.apiKey 처럼 깊은 것도 있다)
+    let node = clean;
+    for (const key of keys.slice(0, -1)) node = node?.[key];
+    const last = keys[keys.length - 1];
+    const value = node?.[last];
+    if (typeof value === 'string' && /^[●•*]+$/.test(value.trim())) delete node[last];
   }
 
   const next = deepMerge(getSettings(), clean);
@@ -190,5 +205,7 @@ export function publicSettings() {
   const settings = structuredClone(stored);
   settings.image.apiKeySet = Boolean(stored.image.apiKey);
   settings.image.apiKey = '';
+  settings.image.pexels.apiKeySet = Boolean(stored.image.pexels?.apiKey);
+  settings.image.pexels.apiKey = '';
   return settings;
 }

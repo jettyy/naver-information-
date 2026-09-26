@@ -4,6 +4,7 @@ import { getSettings } from '../lib/settings.js';
 import { logger } from '../lib/events.js';
 import { IMAGE_MODEL_FILE, ensureDirs } from '../lib/paths.js';
 import { generateViaChatGpt } from '../chatgpt/image.js';
+import { fetchPexelsPhoto } from './pexels.js';
 
 /**
  * 썸네일 이미지 생성.
@@ -707,6 +708,31 @@ export async function maybeGenerateImage(spec, { signal, width, height, jobId = 
         + (error.screenshot ? ` — 그때 화면: ${error.screenshot}` : ''),
         { jobId },
       );
+      return null;
+    }
+  }
+
+  /*
+   * Pexels — 무료 사진을 받아 **배경으로만** 쓴다.
+   *
+   * 찍혀 있는 사진이라 제목을 그림 안에 넣을 수가 없다. 그래서 설정이
+   * "통째로 그리기" 여도 여기서는 배경으로 돌린다. 한글은 HTML 이 얹는다.
+   * 그 덕에 한글이 깨질 일이 아예 없어서 글자 검사도 필요 없다.
+   */
+  if (image.provider === 'pexels') {
+    try {
+      const result = await fetchPexelsPhoto(spec, { width, height, signal });
+      if (full) {
+        logger.info(
+          'Pexels 사진은 글자를 그릴 수 없어 배경으로 씁니다. 제목은 HTML 이 얹습니다.',
+          { jobId },
+        );
+      }
+      return { ...result, mode: 'overlay' };
+    } catch (error) {
+      if (error.rateLimited) logger.warn(`Pexels: ${error.message}`, { jobId });
+      // 그림은 글의 부속물이다. 여기서 실패했다고 다 쓴 글을 버리지 않는다.
+      else logger.warn(`Pexels 사진 실패, HTML 썸네일로 만듭니다: ${error.message}`, { jobId });
       return null;
     }
   }
