@@ -1254,6 +1254,33 @@ test('글에 맞는 카테고리를 이름만 보고도 고른다', () => {
   }).name, 'IT·전자기기');
 });
 
+test('기호뿐인 태그가 섞여도 카테고리가 한 곳으로 고정되지 않는다', () => {
+  /*
+   * 실제로 있었던 사고. "·" 처럼 기호만 든 태그는 다듬으면 빈 문자열이 되는데,
+   * `clean.includes('')` 이 언제나 참이라서 **모든 카테고리가 똑같이 60점**을
+   * 받았다. 그러면 늘 목록의 첫 번째가 뽑혀서, 글마다 달라야 할 카테고리가
+   * 전부 한 곳(첫 카테고리)으로 갔다.
+   */
+  const list = ['교육', '재테크', '맛집', '여행', 'IT'];
+  for (const tags of [['연봉', '·'], ['', '연금'], ['#'], ['a']]) {
+    const { name, scores } = pickByKeyword(list, {
+      title: '대기업 평균 연봉 순위 TOP 30',
+      topic: '대기업 연봉',
+      tags,
+    });
+    assert.equal(name, '', `태그 ${JSON.stringify(tags)} 에서 "${name}" 로 고정됐습니다`);
+    // 전부 0점이어야 한다. 하나라도 점수가 붙으면 또 고정된다.
+    assert.equal(scores[0].score, 0, `${scores[0].name} 이 ${scores[0].score}점을 받았습니다`);
+  }
+});
+
+test('점수가 같으면 아무도 고르지 않고 AI 에게 넘긴다', () => {
+  // 동점인데 하나를 집으면 늘 첫 번째가 뽑힌다. 그게 "고정" 의 정체였다.
+  const { name, tied } = pickByKeyword(['교육', '교육'], { title: '교육 정책', tags: [] });
+  assert.equal(name, '', `동점인데 "${name}" 을 골랐습니다`);
+  assert.ok(tied > 1, `동점 수가 ${tied} 입니다`);
+});
+
 test('겹치는 이름이 없으면 억지로 고르지 않는다', () => {
   // 여기서 아무거나 집으면 엉뚱한 카테고리에 글이 쌓인다. 그때는 AI 에게 묻는다.
   const { name, score } = pickByKeyword(['맛집', '여행'], {

@@ -36,8 +36,18 @@ export function scoreCategory(name, { title = '', tags = [], topic = '', summary
 
   const inTitle = normalizeName(title);
   const inTopic = normalizeName(topic);
-  const inTags = tags.map((tag) => normalizeName(tag));
   const inSummary = normalizeName(summary);
+
+  /*
+   * 태그는 **두 글자 이상 남는 것만** 본다.
+   *
+   * 이게 없어서 카테고리가 한 곳으로 고정되는 사고가 났다. 기호만 든 태그
+   * ("·", "#") 는 다듬으면 빈 문자열이 되는데, `clean.includes('')` 은 언제나
+   * 참이라서 **모든 카테고리가 똑같이 60점**을 받았다. 점수가 다 같으니
+   * 목록의 첫 번째 카테고리가 늘 뽑혔고, 글마다 다른 곳에 들어가야 할 것이
+   * 전부 한 곳으로 갔다.
+   */
+  const inTags = tags.map((tag) => normalizeName(tag)).filter((tag) => tag.length >= 2);
 
   let score = 0;
   // 제목에 카테고리 이름이 통째로 들어 있으면 거의 확실하다.
@@ -62,7 +72,15 @@ export function scoreCategory(name, { title = '', tags = [], topic = '', summary
   return score;
 }
 
-/** 글자 겹침만으로 고른다. 호출이 필요 없다. */
+/**
+ * 글자 겹침만으로 고른다. 호출이 필요 없다.
+ *
+ * 1등이 여럿이면 **아무도 고르지 않는다.** 점수가 같은데 하나를 집으면 늘
+ * 목록의 첫 번째가 뽑히고, 글마다 달라야 할 카테고리가 한 곳으로 고정된다.
+ * 그럴 때는 AI 에게 넘기는 것이 맞다.
+ *
+ * @returns {{name: string, score: number, tied: number, scores: object[]}}
+ */
 export function pickByKeyword(categories, post) {
   const facts = {
     title: post.title || '',
@@ -71,21 +89,30 @@ export function pickByKeyword(categories, post) {
     summary: post.summary || '',
   };
 
-  let best = '';
-  let bestScore = 0;
-  for (const name of categories) {
-    const score = scoreCategory(name, facts);
-    if (score > bestScore) {
-      bestScore = score;
-      best = name;
-    }
-  }
-  return { name: best, score: bestScore };
+  const scores = categories
+    .map((name) => ({ name, score: scoreCategory(name, facts) }))
+    .sort((a, b) => b.score - a.score);
+
+  const top = scores[0];
+  if (!top || top.score <= 0) return { name: '', score: 0, tied: 0, scores };
+
+  const tied = scores.filter((item) => item.score === top.score).length;
+  // 공동 1등이면 이름만으로는 못 정한다. 빈손으로 돌려 AI 가 고르게 한다.
+  if (tied > 1) return { name: '', score: top.score, tied, scores };
+
+  return { name: top.name, score: top.score, tied: 1, scores };
 }
 
 /** AI 에게 물을 때 쓰는 말. 목록 밖의 답을 막는 것이 핵심이다. */
 export function buildCategoryPrompt(categories, post) {
   const list = categories.map((name, index) => `${index + 1}. ${name}`).join('\n');
+  // 소제목까지 보여준다. 제목만으로는 무엇에 대한 글인지 덜 드러난다.
+  const headings = (post.sections || [])
+    .map((section) => section?.heading)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join(' / ');
+
   return `블로그 글 하나를 어느 카테고리에 넣을지 고르세요.
 
 [글]
@@ -93,6 +120,7 @@ export function buildCategoryPrompt(categories, post) {
 - 주제: ${post.topic || ''}
 - 요약: ${String(post.summary || '').slice(0, 200)}
 - 태그: ${(post.tags || []).join(', ')}
+${headings ? `- 소제목: ${headings}` : ''}
 
 [고를 수 있는 카테고리 — 이 목록 밖의 이름을 쓰면 안 됩니다]
 ${list}
@@ -101,11 +129,17 @@ ${list}
 - 위 목록에 **있는 이름을 글자 그대로** 하나만 고르세요.
 - 새 카테고리를 만들거나 이름을 바꾸지 마세요.
 - 딱 맞는 것이 없으면 그중 **가장 가까운 것**을 고르세요. "없음" 은 답이 아닙니다.
-- 이 블로그가 그 분야를 꾸준히 다루는 것으로 보이게, 글의 큰 갈래를 보세요.
-  (예: "국가기술자격증 TOP 5" → 자격증 / 교육 / 취업 쪽)
+
+[무엇을 보고 고를 것인가]
+- **이 글이 실제로 무엇에 대한 글인지**를 보세요. 제목에 든 낱말 하나가 아니라
+  글 전체가 다루는 대상입니다.
+- 매번 무난한 한 곳으로 몰아넣지 마세요. 글이 다르면 카테고리도 달라야 합니다.
+  (예: "대학 순위" → 교육 쪽 / "대기업 연봉 순위" → 취업·직장 쪽 /
+   "연말정산 환급" → 재테크 쪽. 셋 다 "순위" 글이지만 갈래가 다릅니다)
+- 고민되면 **읽는 사람이 어느 칸에서 이 글을 찾을지**로 판단하세요.
 
 [출력] JSON 객체 하나만.
-{"category": "고른 이름", "why": "왜 그 카테고리인지 한 줄"}`;
+{"category": "고른 이름", "why": "이 글이 무엇에 대한 글이라서 그 카테고리인지 한 줄"}`;
 }
 
 /**
@@ -120,10 +154,13 @@ export async function chooseCategory(categories, post, { signal } = {}) {
   if (!list.length) return { name: '', why: '', how: '' };
   if (list.length === 1) return { name: list[0], why: '카테고리가 하나뿐입니다.', how: '유일' };
 
-  // 1) 글자 겹침. 확실하면 여기서 끝낸다. 호출을 아낀다.
+  // 1) 글자 겹침. **혼자 1등일 때만** 여기서 끝낸다. 호출을 아낀다.
   const keyword = pickByKeyword(list, post);
-  if (keyword.score >= 60) {
+  if (keyword.name && keyword.score >= 60) {
     return { name: keyword.name, why: '제목·태그와 이름이 겹칩니다.', how: '이름 겹침' };
+  }
+  if (keyword.tied > 1) {
+    logger.info(`카테고리 ${keyword.tied}개가 같은 점수라 AI 에게 고르게 합니다.`);
   }
 
   // 2) 애매하면 AI 에게 묻는다.
@@ -139,6 +176,7 @@ export async function chooseCategory(categories, post, { signal } = {}) {
     if (exact) {
       return { name: exact, why: String(reply.data?.why || '').slice(0, 120), how: 'AI' };
     }
+    // 목록에 없는 이름이다. 무엇을 골랐는지 남겨야 다음에 원인을 찾을 수 있다.
     logger.warn(`AI 가 목록에 없는 카테고리를 골랐습니다: "${picked}"`);
   } catch (error) {
     // 카테고리 하나 때문에 다 쓴 글을 버리지 않는다.

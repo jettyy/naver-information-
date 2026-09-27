@@ -569,7 +569,11 @@ async function applyCategory(page, scope, post, jobId) {
     const index = names.findIndex((name) => name === choice.name);
     await items.nth(index).click({ timeout: 6000 });
     await page.waitForTimeout(600);
-    logger.info(`카테고리를 "${choice.name}" 로 골랐습니다. (${choice.how})`, { jobId });
+    logger.info(
+      `카테고리를 "${choice.name}" 로 골랐습니다. (${choice.how})`
+      + `${choice.why ? ` — ${choice.why}` : ''}`,
+      { jobId },
+    );
     return { name: choice.name, how: choice.how };
   } catch (error) {
     logger.warn(`카테고리를 고르지 못했습니다: ${error.message.split('\n')[0]}`, { jobId });
